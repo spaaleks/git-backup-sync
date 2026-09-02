@@ -1,0 +1,33 @@
+data_dir: ./test/fixtures/mail
+timezone: UTC
+
+schedule:
+  sync: "0 3 * * *"
+  heartbeat: "0 8 * * 1"
+
+connections:
+  github:
+    provider: github
+    token: ${GH_TOKEN}
+
+  gitlab:
+    provider: gitlab
+    host: gitlab.example.com
+    token: ${GL_TOKEN}
+
+smtp:
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT}
+  from: sync@example.test
+  to: [ "inbox@example.test" ]
+
+sources:
+  - name: github
+    connection: github
+    scope:
+      type: user
+      login: acme
+    destination:
+      connection: gitlab
+      namespace: mirror
+      structure: preserve

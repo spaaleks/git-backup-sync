@@ -1,0 +1,174 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Run unit tests
+        run: npm run test:ci
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: reports/junit.xml
+
+      - name: Publish unit test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Unit Tests
+          path: reports/junit.xml
+          reporter: java-junit
+
+  mail:
+    runs-on: ubuntu-latest
+    services:
+      mailpit:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
+
+    env:
+      GH_TOKEN: fixture
+      GL_TOKEN: fixture
+      SMTP_HOST: 127.0.0.1
+      SMTP_PORT: 1025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Render and deliver both reports
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          node src/index.js --config test/fixtures/mail/config.yml \
+            --preview-mail --html reports/mail-run.html
+          node src/index.js --config test/fixtures/mail/config.yml \
+            --preview-mail --heartbeat-template --html reports/mail-heartbeat.html
+
+      - name: Check what arrived
+        run: |
+          set -euo pipefail
+          messages="$(curl -sf http://127.0.0.1:8025/api/v1/messages)"
+          count="$(printf '%s' "$messages" | grep -o '"ID":"' | wc -l)"
+          [ "$count" -eq 2 ] || { echo "expected 2 messages, got $count"; exit 1; }
+
+          for id in $(printf '%s' "$messages" | sed -n 's/.*"ID":"\([^"]*\)".*/\1/p'); do
+            curl -sf "http://127.0.0.1:8025/api/v1/message/$id/raw" -o "reports/$id.eml"
+          done
+
+          for f in reports/mail-run.html reports/mail-heartbeat.html; do
+            grep -q '^<!doctype html>' "$f" || { echo "$f is not a document"; exit 1; }
+            grep -qE '<script|<link|src="https?:|src="data:' "$f" && { echo "$f has external assets"; exit 1; }
+          done
+          grep -q 'acme/hosting/legacy' reports/mail-run.html
+          grep -q 'Never synced successfully' reports/mail-heartbeat.html
+
+      - name: Upload the rendered mail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mail-preview
+          path: reports/
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: git-backup-sync:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+
+          docker run --rm git-backup-sync:ci --help | grep -q 'git-backup-sync'
+
+          missing="$(grep -oE '\$\{[A-Z_]+' config.example.yml | tr -d '${' | sort -u | head -1)"
+          echo "expecting the failure to name $missing"
+
+          set +e
+          out="$(docker run --rm \
+            -v "${PWD}/config.example.yml:/config/config.yml:ro" \
+            git-backup-sync:ci --check-config 2>&1)"
+          code=$?
+          set -e
+          echo "$out"
+          [ "$code" -ne 0 ] || { echo "expected a non-zero exit for an unset variable"; exit 1; }
+          echo "$out" | grep -q "$missing" || { echo "expected the missing variable to be named"; exit 1; }
+
+          docker run --rm --entrypoint sh git-backup-sync:ci -c 'git --version && git lfs version && ssh -V'
+
+          uid="$(docker run --rm --entrypoint id git-backup-sync:ci -u)"
+          [ "$uid" = "1000" ] || { echo "expected uid 1000, got $uid"; exit 1; }

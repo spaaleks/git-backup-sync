@@ -1,0 +1,37 @@
+# Minimal: one GitHub account into one GitLab group.
+# See config-full.example.yml for every option.
+
+schedule:
+  sync: "0 3 * * *"
+  heartbeat: "0 8 * * 1"
+
+connections:
+  github:
+    provider: github
+    token: ${GH_TOKEN}
+    ssh_key: /run/secrets/id_src
+
+  gitlab:
+    provider: gitlab
+    host: gitlab.example.com
+    token: ${GL_TOKEN}
+    ssh_key: /run/secrets/id_dst
+
+smtp:
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT:-587}
+  user: ${SMTP_USER:-}
+  password: ${SMTP_PASS:-}
+  from: ${SMTP_FROM}
+  to: [ "${SMTP_TO}" ]
+
+sources:
+  - name: github
+    connection: github
+    scope:
+      type: user
+      login: ${GH_USER}
+    destination:
+      connection: gitlab
+      namespace: mirror
+      structure: preserve

@@ -1,0 +1,38 @@
+{
+  "name": "git-backup-sync",
+  "version": "1.0.0",
+  "description": "Mirror git repositories between GitHub, GitLab and folders on a schedule, reporting by email, ntfy, Uptime Kuma and Prometheus.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "git-backup-sync": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check-config": "node src/index.js --check-config",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "node --test --test-timeout=30000 test/*.test.js",
+    "test:ci": "mkdir -p reports && node --test --test-timeout=30000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=reports/junit.xml test/*.test.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.14",
+    "yaml": "^2.4.5"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5"
+  },
+  "keywords": [
+    "git",
+    "mirror",
+    "backup",
+    "gitlab",
+    "github",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "author": "Aleksandar Spasojevic"
+}

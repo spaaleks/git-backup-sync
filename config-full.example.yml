@@ -1,0 +1,385 @@
+# ---------------------------------------------------------------------------
+# git-backup-sync
+#
+# Mirrors git repositories between GitHub, GitLab and folders.
+# Sources: github, gitlab, or a plain list of clone urls needing no API access.
+# Destinations: gitlab, github, or a directory of bare mirrors or working trees.
+#
+# This file is safe to commit. Every secret is an ${ENV_VAR} reference that is
+# resolved at startup, and nothing here is a credential.
+#
+#   ${VAR}             required. If it is unset the service refuses to start and
+#                      names the offending key. It never resolves to "".
+#   ${VAR:-fallback}   the fallback is used when VAR is unset *or* empty.
+#   $${literal}        an escaped "${", passed through untouched.
+#
+# Validate everything without touching the network twice:
+#     docker compose run --rm sync --check-config
+# ---------------------------------------------------------------------------
+
+# Mirrors and state.json live here. Use a volume.
+data_dir: /data
+
+# Repositories in flight per source.
+concurrency: 4
+
+# Wait this long after a batch of `concurrency` repositories that actually
+# transferred something, to go easy on the source and destination servers.
+# A batch where nothing changed is not waited out. 0 keeps a continuous worker
+# pool, where one slow repository never holds up the others. Any value above 0
+# switches to fixed batches, because a pause needs a boundary to pause at.
+# Both keys can be overridden per source.
+batch_pause_seconds: 0
+
+# How many ref changes a batch needs before it counts as work worth pausing
+# after. A batch containing a first clone always counts, whatever this is set to.
+batch_pause_min_changes: 1
+
+# true: enumerate and resolve, create nothing, mail nothing.
+dry_run: false
+
+# Sync once at boot rather than waiting for the cron.
+run_on_start: true
+
+# error | warn | info | debug
+log_level: info
+
+# Cron is evaluated in this zone. Defaults to TZ, then UTC.
+timezone: Europe/Berlin
+
+# Kill any git invocation that hangs longer than this.
+git_timeout_minutes: 30
+
+# Run records retained in state.json.
+keep_runs: 30
+
+# Remove mirror directories nothing references any more. A repository that
+# vanished from its source keeps its mirror: that copy may be the only one left.
+prune_mirrors: true
+
+schedule:
+  # Every night at 03:00 local.
+  sync: "0 3 * * *"
+  # Mondays at 08:00. Omit or set null to disable.
+  heartbeat: "0 8 * * 1"
+
+# ---------------------------------------------------------------------------
+# Connections: every credential the service holds, named once. Sources and
+# destinations reference these by name. Two accounts on the same host are two
+# connections, because they are two independent rate-limit budgets.
+# ---------------------------------------------------------------------------
+connections:
+  gh-personal:
+    provider: github
+    api_url: https://api.github.com
+    # Listing only, never handed to git. Fine-grained token with
+    # Metadata: Read-only, or a classic token with `repo` for private repos.
+    token: ${GH_PERSONAL_TOKEN}
+    ssh_key: ${SSH_KEY_GH:-/run/secrets/id_gh}
+
+  gh-work:
+    provider: github
+    api_url: https://api.github.com
+    token: ${GH_WORK_TOKEN}
+    ssh_key: ${SSH_KEY_GH_WORK:-/run/secrets/id_gh_work}
+
+  gl-old:
+    provider: gitlab
+    # SSH host and, by default, the API host.
+    host: gitlab.example.com
+    # Needs `api` scope.
+    token: ${GL_OLD_TOKEN}
+    ssh_key: ${SSH_KEY_GL_OLD:-/run/secrets/id_gl_old}
+    ssh_port: 22
+    # Only needed if the API is not at https://<host>/api/v4:
+    # api_url: https://gitlab.example.com/api/v4
+
+  # No API and no token: credentials for git only, which is what a plain list
+  # of clone URLs needs. Omit ssh_key entirely for public https URLs.
+  public:
+    provider: git
+
+  gl-new:
+    provider: gitlab
+    host: gitlab.com
+    token: ${GL_NEW_TOKEN}
+    ssh_key: ${SSH_KEY_GL_NEW:-/run/secrets/id_gl_new}
+    # Pin the host key instead of trusting first use:
+    # known_hosts: /run/secrets/known_hosts
+    # strict_host_key_checking: true
+
+# Omit this whole block, or set `enabled: false`, to run without mail.
+# host, from and to are only required while mail is enabled.
+smtp:
+  host: ${SMTP_HOST}
+  port: ${SMTP_PORT:-587}
+  # true for implicit TLS on 465.
+  secure: false
+  user: ${SMTP_USER:-}
+  password: ${SMTP_PASS:-}
+  from: ${SMTP_FROM}
+  # Quote it: inside [ ], a bare ${...} is not valid YAML.
+  to: ["${SMTP_TO}"]
+  # Or [always], or [failures].
+  notify_on: [changes, failures]
+  subject_prefix: "[repo-sync]"
+  retries: 3
+  # Attached by content id and shown at the top of every mail. Omit for none.
+  # logo: /config/logo.png
+
+# ---------------------------------------------------------------------------
+# Push notifications.
+#
+# ntfy is event reporting: it stays quiet when nothing happened, like mail.
+# Uptime Kuma is a dead man's switch: it is pushed on every run, and its value
+# is entirely in the ping that does not arrive when the service stops running.
+#
+# Both can be global, per source, or both. A per-source block inherits every
+# field it does not set.
+# ---------------------------------------------------------------------------
+ntfy:
+  url: ${NTFY_URL:-https://ntfy.sh}
+  topic: ${NTFY_TOPIC}
+  # Bearer token, or username/password for basic auth. Both optional.
+  token: ${NTFY_TOKEN:-}
+  priority: default
+  failure_priority: high
+  # changes | failures | always
+  notify_on: [changes, failures]
+
+uptime_kuma:
+  # The full push URL from the monitor, token included.
+  url: ${KUMA_PUSH_URL}
+
+# Prometheus metrics on /metrics, plus /health. Remove this block to keep the
+# port closed.
+metrics:
+  enabled: true
+  host: 0.0.0.0
+  port: 9091
+  path: /metrics
+
+# Inherited by every source unless the source overrides it.
+defaults:
+  include_forks: false
+  include_archived: false
+  # private | internal | public | original
+  # `original` follows whatever each source repository is set to.
+  # Applied on every run, so changing this later moves existing projects too.
+  visibility: private
+  # Subgroups below the root, never the root itself.
+  auto_create_namespaces: true
+  structure: preserve
+  path_template: "{repo}"
+  flatten_separator: "-"
+  # report | archive | delete
+  on_remap: report
+  # Opt-in, best effort. See README.
+  mirror_wikis: false
+  # `--mirror` does not carry LFS blobs.
+  mirror_lfs: false
+  # refspecs | mirror. See README.
+  push_mode: refspecs
+  # Disable the destination push rules that reject a faithful mirror, on the
+  # projects this service manages. See README.
+  relax_push_rules: false
+  # Turn off CI on the destination projects. A mirrored .gitlab-ci.yml would
+  # otherwise run on your own runners on every push.
+  disable_ci: true
+  # Copy description, topics and the default branch to the destination.
+  sync_metadata: true
+  # Read the destination back after writing to it.
+  # push | always | off
+  verify: push
+
+# ---------------------------------------------------------------------------
+# Sources: what to enumerate, and where it goes.
+#
+# `name` is a state key. Never reuse a retired name, and never rename a live
+# one: the service would treat every repository under it as new.
+# ---------------------------------------------------------------------------
+sources:
+  # -------------------------------------------------------------------------
+  # Case: userA -> userB
+  # A GitHub account's own repositories into a GitLab personal namespace.
+  #
+  # `flatten` is not a style choice here. GitLab personal namespaces cannot
+  # contain subgroups, so `preserve` into one is impossible the moment a source
+  # repository sits below a group. GitHub has no nesting, so flatten and
+  # preserve are identical for this source, but flatten states the intent and
+  # keeps working if the source ever moves to GitLab.
+  # -------------------------------------------------------------------------
+  - name: gh-me
+    connection: gh-personal
+    scope:
+      type: user
+      login: ${GH_USER}
+    destination:
+      connection: gl-new
+      # A personal namespace. It must already exist.
+      namespace: userB
+      structure: flatten
+
+  # -------------------------------------------------------------------------
+  # Case: userA + orgA -> userB
+  # A second source merged into the same destination namespace. Without the
+  # prefix, gh-me's "utils" and this source's "utils" would resolve to one
+  # project, and pre-flight would abort the run rather than merge them.
+  # -------------------------------------------------------------------------
+  - name: gh-acme
+    connection: gh-work
+    scope:
+      type: org
+      login: acme-corp
+    destination:
+      connection: gl-new
+      namespace: userB
+      structure: template
+      path_template: "acme-{repo}"
+
+  # -------------------------------------------------------------------------
+  # Case: orgA -> orgA
+  # Same name, different instance. The root group `widgets-inc` must already
+  # exist on gl-new. Only groups below it are created automatically.
+  # -------------------------------------------------------------------------
+  - name: gh-widgets
+    connection: gh-work
+    scope:
+      type: org
+      login: widgets-inc
+    destination:
+      connection: gl-new
+      namespace: widgets-inc
+      structure: preserve
+    exclude:
+      - "^widgets-inc/.*-sandbox$"
+
+  # -------------------------------------------------------------------------
+  # Case: userA and all its groups -> a mirrored tree on another GitLab
+  # The full subgroup tree is recreated beneath `userA-mirror`, which must be a
+  # group (not a personal namespace) because it will contain subgroups.
+  # -------------------------------------------------------------------------
+  - name: gl-migration
+    connection: gl-old
+    scope:
+      type: user
+      login: userA
+      # Every group userA owns, recursively.
+      include_owned_groups: true
+      # Merely-member groups pull in other people's repositories.
+      # Leave this off.
+      include_membership: false
+    destination:
+      connection: gl-new
+      namespace: userA-mirror
+      structure: preserve
+      auto_create_namespaces: true
+      # A long migration adjusts paths a few times, and archiving keeps the
+      # old projects out of the way without losing them.
+      on_remap: archive
+    mirror_wikis: true
+    # This source is noisy and only one person cares, so give it its own topic
+    # and its own monitor. Everything not set here comes from the global block.
+    ntfy:
+      topic: ${NTFY_TOPIC_MIGRATION:-migration}
+    uptime_kuma:
+      url: ${KUMA_PUSH_URL_MIGRATION}
+    rules:
+      # First match wins. Anything that does not match falls through to the
+      # destination block above.
+      - match: "^userA/scratch/"
+        skip: true
+
+      - match: "^userA/infra/(.*)$"
+        namespace: userA-mirror/infrastructure
+        path_template: "{repo}"
+
+      - match: "^userA/(.*)/legacy-(.*)$"
+        visibility: private
+        path_template: "legacy-{repo}"
+
+  # -------------------------------------------------------------------------
+  # Case: the source's own groups, recreated at the top level of the
+  # destination rather than inside a container. Needs an account that may
+  # create top-level groups.
+  # -------------------------------------------------------------------------
+  # - name: gl-flat
+  #   connection: gl-old
+  #   scope:
+  #     type: user
+  #     login: userA
+  #     include_owned_groups: true
+  #   destination:
+  #     connection: gl-new
+  #     structure: preserve
+  #     create_root_namespace: true
+  #     # Optional. Without it the group keeps its original name.
+  #     path_prefix: "mirror-"
+
+  # -------------------------------------------------------------------------
+  # Case: GitLab -> GitHub.
+  # GitHub repositories cannot be nested, so a nested source must flatten or
+  # use a template. `namespace` is the user or organisation that will own them.
+  # -------------------------------------------------------------------------
+  - name: gl-to-gh
+    connection: gl-old
+    scope:
+      type: group
+      login: acme
+    destination:
+      type: github
+      connection: gh-work
+      namespace: acme-org
+      structure: flatten
+
+  # -------------------------------------------------------------------------
+  # Case: no API access on the source at all, just clone URLs.
+  # Works for public repositories with no credentials whatsoever. `-> target`
+  # in the list, or `destination:` inline, pins one repository to one path.
+  # -------------------------------------------------------------------------
+  - name: links
+    connection: public
+    scope:
+      type: urls
+      urls:
+        - https://github.com/acme/router.git
+        - url: https://gitlab.com/acme/net/switch.git
+          destination: vendor/switch
+    destination:
+      connection: gl-new
+      namespace: vendor
+      structure: preserve
+
+  # -------------------------------------------------------------------------
+  # Case: a plain folder rather than a git server.
+  # `bare` is a real backup you can `git clone` from. `worktree` is a checkout
+  # you can read, which cannot restore branches or tags.
+  # -------------------------------------------------------------------------
+  - name: to-disk
+    connection: public
+    scope:
+      type: urls
+      urls:
+        - https://github.com/acme/router.git
+    destination:
+      type: directory
+      path: /data/backup
+      format: bare
+      structure: preserve
+
+  # -------------------------------------------------------------------------
+  # Case: a hand-picked list, no enumeration at all.
+  # -------------------------------------------------------------------------
+  - name: gl-pinned
+    connection: gl-old
+    enabled: true
+    scope:
+      type: projects
+      projects:
+        - group-x/service-a
+        - group-y/service-b
+    destination:
+      connection: gl-new
+      namespace: archive
+      structure: flatten
+      flatten_separator: "--"
