@@ -1,0 +1,121 @@
+name: Publish Quay.io
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'dev-*'
+    tags:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  wait-for-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Wait for lint
+        uses: fountainhead/action-wait-for-check@v1.2.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          checkName: lint
+          ref: ${{ github.sha }}
+          timeoutSeconds: 900
+          intervalSeconds: 15
+
+      - name: Wait for unit tests
+        uses: fountainhead/action-wait-for-check@v1.2.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          checkName: unit-tests
+          ref: ${{ github.sha }}
+          timeoutSeconds: 900
+          intervalSeconds: 15
+
+      - name: Wait for the mail check
+        uses: fountainhead/action-wait-for-check@v1.2.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          checkName: mail
+          ref: ${{ github.sha }}
+          timeoutSeconds: 900
+          intervalSeconds: 15
+
+      - name: Wait for the image build
+        uses: fountainhead/action-wait-for-check@v1.2.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          checkName: docker-build
+          ref: ${{ github.sha }}
+          timeoutSeconds: 900
+          intervalSeconds: 15
+
+
+  publish:
+    needs: wait-for-checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      QUAY_USER: ${{ vars.QUAY_USER }}
+      QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+      QUAY_IMAGE: ${{ vars.QUAY_IMAGE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          for var in QUAY_USER QUAY_PASSWORD QUAY_IMAGE; do
+            if [ -z "${!var}" ]; then
+              echo "Missing value for $var" >&2
+              exit 1
+            fi
+          done
+
+      - name: Determine tags
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          ref_name="${GITHUB_REF_NAME}"
+          sha_short="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          if [[ "${ref}" == refs/tags/* ]]; then
+            suffix="${ref#refs/tags/}"
+          elif [[ "${ref_name}" == "main" ]]; then
+            suffix="latest"
+          else
+            slug="$(printf '%s' "${ref_name}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g')"
+            [[ -z "${slug}" ]] && slug="sha-${sha_short}"
+            suffix="${slug}"
+          fi
+          echo "BASE_TAG=quay.io/${QUAY_IMAGE}:${suffix}" >> "${GITHUB_ENV}"
+          echo "SHA_TAG=quay.io/${QUAY_IMAGE}:sha-${sha_short}" >> "${GITHUB_ENV}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ env.QUAY_USER }}
+          password: ${{ env.QUAY_PASSWORD }}
+
+      - name: Build and push a multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.BASE_TAG }}
+            ${{ env.SHA_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

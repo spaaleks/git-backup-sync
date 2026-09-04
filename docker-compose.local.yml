@@ -1,0 +1,44 @@
+services:
+  sync:
+    build: .
+    image: git-backup-sync:local
+    container_name: git-backup-sync
+    restart: unless-stopped
+
+    # Let the in-flight repository finish instead of being killed after 10s.
+    stop_grace_period: 5m
+
+    # Rootless Docker maps your host user to container uid 0, so running as
+    # container root is what makes ./data writable and keeps the files owned by
+    # you on the host. This is not host root: rootless Docker has no path to it.
+    # Under a normal rootful daemon, delete this line and instead
+    # `sudo chown -R 1000:1000 ./data`, so the image's non-root `node` user owns
+    # the mount.
+    user: "0:0"
+
+    env_file:
+      - .env
+
+    environment:
+      CONFIG_PATH: /config/config.yml
+      TZ: Europe/Vienna
+
+    ports:
+      # Prometheus metrics and /health.
+      - "127.0.0.1:9091:9091"
+
+    volumes:
+      - ./config.yml:/config/config.yml:ro
+      - ./data:/data
+      # Keys must be 0400. OpenSSH refuses a private key that is readable by anyone else.
+      - ./secrets:/run/secrets:ro
+
+    # Structured JSON on stdout, no log files in the container.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    security_opt:
+      - no-new-privileges:true

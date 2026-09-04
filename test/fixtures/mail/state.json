@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "sources": {
+    "github": {
+      "connection": "github",
+      "lastRunAt": "2026-09-03T03:00:41Z",
+      "repos": {
+        "acme/infra/router": {
+          "destination": "gitlab:mirror/infra/router",
+          "refs": { "refs/heads/main": "9574aac1f3c3111b5920f2cecf505b37350a93df" },
+          "lastSuccess": "2026-09-03T03:00:11Z",
+          "consecutiveFailures": 0,
+          "sizeBytes": 4718592
+        },
+        "acme/notes": {
+          "destination": "gitlab:mirror/notes",
+          "refs": { "refs/heads/main": "1111111111111111111111111111111111111111" },
+          "lastSuccess": "2026-09-03T03:00:19Z",
+          "consecutiveFailures": 0,
+          "sizeBytes": 131072
+        },
+        "acme/hosting/legacy": {
+          "destination": "gitlab:mirror/hosting/legacy",
+          "refs": {},
+          "lastSuccess": null,
+          "consecutiveFailures": 4,
+          "lastError": "git push --prune --force exited with 1\nremote: GitLab: You cannot push commits for 'noreply@example.com'.",
+          "sizeBytes": 0
+        }
+      }
+    },
+    "retired": {
+      "connection": "gitlab",
+      "lastRunAt": "2026-08-20T03:00:00Z",
+      "repos": { "old/thing": { "destination": "gitlab:mirror/thing", "refs": {}, "lastSuccess": "2026-08-20T03:00:00Z", "consecutiveFailures": 0, "sizeBytes": 2048 } }
+    }
+  },
+  "runs": [
+    { "startedAt": "2026-09-02T03:00:00Z", "durationMs": 38000, "changed": 2, "failed": 0, "fatal": null },
+    { "startedAt": "2026-09-03T03:00:00Z", "durationMs": 41234, "changed": 1, "failed": 1, "fatal": null }
+  ],
+  "lastHeartbeatAt": "2026-09-01T08:00:00Z"
+}

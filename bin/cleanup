@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Undo a source: delete the destination projects it created, drop its local
+# mirrors, and forget its state.
+#
+#   bin/cleanup <source>              show the plan, change nothing
+#   bin/cleanup <source> --yes        apply it
+#   bin/cleanup <source> --yes --force        include projects that have commits
+#   bin/cleanup <source> --yes --keep-state   delete projects, keep state
+#
+# Without --yes nothing is touched, so run it bare first and read the plan.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+usage() {
+  # Print the header comment block, whatever length it is.
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+  if [ -f config.yml ]; then
+    echo
+    echo "sources in config.yml:"
+    grep -oE '^\s*-\s*name:\s*\S+' config.yml | awk '{print "  " $NF}'
+  fi
+}
+
+if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage
+  exit 1
+fi
+
+source_name="$1"; shift
+
+for f in config.yml .env; do
+  [ -f "$f" ] || { echo "missing $root/$f" >&2; exit 1; }
+done
+
+# Set COMPOSE_FILE=docker-compose.local.yml to use a locally built image.
+export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+# Deleting projects is the most destructive thing here, so confirm out loud
+# rather than relying on the flag alone being noticed.
+for arg in "$@"; do
+  if [ "$arg" = "--yes" ]; then
+    echo "About to APPLY cleanup for source \"$source_name\" (projects will be deleted)."
+    printf 'Type the source name to confirm: '
+    read -r answer
+    [ "$answer" = "$source_name" ] || { echo "aborted"; exit 1; }
+    echo
+  fi
+done
+
+exec docker compose run --rm sync --cleanup "$source_name" "$@"

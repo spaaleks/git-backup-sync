@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Inspect the sync lock, and remove it if the holder is gone.
+#
+#   bin/unlock            show the lock; remove it only if it is stale
+#   bin/unlock --force    remove it even if it looks alive
+#
+# The holder refreshes the lock every 30 seconds, so one untouched for five
+# minutes belongs to a process that is no longer running. That is the normal
+# case after a container was killed.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+  exit 0
+fi
+
+for f in config.yml .env; do
+  [ -f "$f" ] || { echo "missing $root/$f" >&2; exit 1; }
+done
+
+# Set COMPOSE_FILE=docker-compose.local.yml to use a locally built image.
+export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+exec docker compose run --rm sync --unlock "$@"

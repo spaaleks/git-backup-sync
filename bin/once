@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Run one sync now and exit. Safe to run while the scheduler is up: the
+# lockfile in data_dir stops two syncs overlapping, and the scheduler re-reads
+# state.json before its next run.
+#
+#   bin/once                      sync every enabled source
+#   bin/once <source>             sync only that source
+#   bin/once <source> <source>    sync those two
+#
+# Every source is still enumerated and mapped even when you narrow the run,
+# because the collision check only means anything across all of them at once.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+for f in config.yml .env; do
+  [ -f "$f" ] || { echo "missing $root/$f" >&2; exit 1; }
+done
+
+# Set COMPOSE_FILE=docker-compose.local.yml to use a locally built image.
+export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+if docker compose ps --status running --services 2>/dev/null | grep -qx sync; then
+  echo "note: the scheduler is running. To trigger it in place instead of starting"
+  echo "      a second container:  docker compose kill -s SIGUSR1 sync"
+  echo
+fi
+
+exec docker compose run --rm sync --once "$@"
