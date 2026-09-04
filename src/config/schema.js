@@ -143,6 +143,22 @@ export const configSchema = S.object({
     { default: {} },
   ),
 
+  database: S.object(
+    {
+      driver: S.string({ enum: ['sqlite', 'postgres'], default: 'sqlite' }),
+      path: S.string({ nonEmpty: true }),
+      host: S.string({ nonEmpty: true }),
+      port: S.number({ integer: true, min: 1, max: 65535 }),
+      name: S.string({ nonEmpty: true }),
+      user: S.string({ nonEmpty: true }),
+      password: S.string(),
+      ssl: S.string({ enum: ['disable', 'require', 'verify-full'] }),
+      ssl_ca: S.string({ nonEmpty: true }),
+      pool_max: S.number({ integer: true, min: 1, max: 100 }),
+    },
+    { default: {} },
+  ),
+
   connections: S.record({ ...connection }, { minEntries: 1, required: true }),
 
   smtp: S.object({
@@ -153,6 +169,7 @@ export const configSchema = S.object({
     user: S.string({ default: '' }),
     password: S.string({ default: '' }),
     from: S.string(),
+    from_name: S.string(),
     to: S.listOf(S.string(), { default: [] }),
     notify_on: S.array(S.string({ enum: ['changes', 'failures', 'always'] }), { default: ['changes', 'failures'] }),
     subject_prefix: S.string({ default: '[repo-sync]' }),

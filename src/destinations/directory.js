@@ -24,30 +24,30 @@ export async function check(mapping) {
   return { ok: true };
 }
 
-export async function ensureTarget(mapping, { env, timeoutMs }) {
+export async function ensureTarget(mapping, { git }) {
   const target = mapping.format === 'bare' ? `${targetPath(mapping)}.git` : targetPath(mapping);
   await mkdir(path.dirname(target), { recursive: true });
 
   let created = false;
   if (mapping.format === 'bare') {
     if (!(await exists(path.join(target, 'HEAD')))) {
-      await runGit(['init', '--bare', '--quiet', target], { env, timeoutMs });
+      await runGit(['init', '--bare', '--quiet', target], { ...git });
       created = true;
     }
   }
   return { target, created, url: target };
 }
 
-export async function deliver(mapping, { mirrorDir, target, env, timeoutMs, defaultBranch, pushMode }) {
+export async function deliver(mapping, { mirrorDir, target, git, defaultBranch, pushMode }) {
   if (mapping.format === 'bare') {
-    await pushMirror(mirrorDir, target, env, timeoutMs, pushMode);
+    await pushMirror(mirrorDir, target, git, pushMode);
     // Without this HEAD keeps whatever `git init --bare` chose, and cloning the
     // backup checks out a branch that does not exist: an empty working tree.
     if (defaultBranch) {
       const ref = `refs/heads/${defaultBranch}`;
-      const { stdout } = await runGit(['--git-dir', target, 'for-each-ref', '--format=%(refname)', ref], { env, timeoutMs });
+      const { stdout } = await runGit(['--git-dir', target, 'for-each-ref', '--format=%(refname)', ref], { ...git });
       if (stdout.trim() === ref) {
-        await runGit(['--git-dir', target, 'symbolic-ref', 'HEAD', ref], { env, timeoutMs });
+        await runGit(['--git-dir', target, 'symbolic-ref', 'HEAD', ref], { ...git });
       }
     }
     return;
@@ -58,15 +58,15 @@ export async function deliver(mapping, { mirrorDir, target, env, timeoutMs, defa
 
   if (!(await exists(path.join(target, '.git')))) {
     await rm(target, { recursive: true, force: true });
-    await runGit(['clone', '--no-hardlinks', '--branch', branch, mirrorDir, target], { env, timeoutMs });
+    await runGit(['clone', '--no-hardlinks', '--branch', branch, mirrorDir, target], { ...git });
     return;
   }
 
-  await runGit(['remote', 'set-url', 'origin', mirrorDir], { cwd: target, env, timeoutMs });
-  await runGit(['fetch', '--prune', '--quiet', 'origin'], { cwd: target, env, timeoutMs });
-  await runGit(['checkout', '--quiet', '-B', branch, `origin/${branch}`], { cwd: target, env, timeoutMs });
-  await runGit(['reset', '--hard', '--quiet', `origin/${branch}`], { cwd: target, env, timeoutMs });
-  await runGit(['clean', '-qfd'], { cwd: target, env, timeoutMs });
+  await runGit(['remote', 'set-url', 'origin', mirrorDir], { cwd: target, ...git });
+  await runGit(['fetch', '--prune', '--quiet', 'origin'], { cwd: target, ...git });
+  await runGit(['checkout', '--quiet', '-B', branch, `origin/${branch}`], { cwd: target, ...git });
+  await runGit(['reset', '--hard', '--quiet', `origin/${branch}`], { cwd: target, ...git });
+  await runGit(['clean', '-qfd'], { cwd: target, ...git });
 }
 
 export function verifiable(mapping) {

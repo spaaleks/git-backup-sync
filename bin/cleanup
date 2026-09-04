@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Undo a source: delete the destination projects it created, drop its local
-# mirrors, and forget its state.
+# Undo what a source wrote: delete the destination projects created from it,
+# drop its local mirrors, and forget its state. <source> only selects which
+# entry to undo. The source itself is read-only here and is never modified.
 #
 #   bin/cleanup <source>              show the plan, change nothing
 #   bin/cleanup <source> --yes        apply it
-#   bin/cleanup <source> --yes --force        include projects that have commits
-#   bin/cleanup <source> --yes --keep-state   delete projects, keep state
+#   bin/cleanup <source> --yes --force        include destination projects that have commits
+#   bin/cleanup <source> --yes --keep-state   delete destination projects, keep state
+#   bin/cleanup <source> --yes --purge        purge them now, no deletion delay
 #
 # Without --yes nothing is touched, so run it bare first and read the plan.
 
@@ -42,7 +44,8 @@ export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 # rather than relying on the flag alone being noticed.
 for arg in "$@"; do
   if [ "$arg" = "--yes" ]; then
-    echo "About to APPLY cleanup for source \"$source_name\" (projects will be deleted)."
+    echo "About to APPLY cleanup for source \"$source_name\"."
+    echo "This DELETES the destination projects created from it. The source is not touched."
     printf 'Type the source name to confirm: '
     read -r answer
     [ "$answer" = "$source_name" ] || { echo "aborted"; exit 1; }

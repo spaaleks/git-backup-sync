@@ -1,8 +1,7 @@
-import { child } from '../logger.js';
 import { gitlab, github } from '../providers/index.js';
 import { NamespaceError } from '../namespaces.js';
 import {
-  gitEnv,
+  gitContext,
   mirrorDir,
   snapshotRefs,
   fetchMirror,
@@ -12,7 +11,6 @@ import {
   directorySize,
 } from '../mirror.js';
 import { diffRefs, refsToState, describeChanges } from '../diff.js';
-import { stopping } from './stop.js';
 import { pushWithRelax } from './push-rules.js';
 import { verifyDestination, describeVerification, VerificationError } from './verify.js';
 import { syncWiki } from './wiki.js';
@@ -22,14 +20,14 @@ import * as githubDest from '../destinations/github.js';
 
 export { VerificationError };
 
-export async function syncRepo({ mapping, source, srcConn, destConn, resolver, state, config, report, dryRun, timeoutMs, lfsAvailable }) {
+export async function syncRepo({ mapping, source, srcConn, destConn, resolver, state, config, report, dryRun, timeoutMs, lfsAvailable, job }) {
   const { repo } = mapping;
-  const rlog = child({ source: source.name, repo: repo.fullPath });
+  const rlog = job.log({ source: source.name, repo: repo.fullPath });
   const previous = state.repos[repo.fullPath];
   const dir = mirrorDir(config.data_dir, source.name, repo.fullPath);
-  const srcEnv = gitEnv(srcConn);
-  const destEnv = mapping.type === 'directory' ? srcEnv : gitEnv(destConn);
   const toDirectory = mapping.type === 'directory';
+  const srcGit = gitContext(srcConn, { timeoutMs, job });
+  const destGit = toDirectory ? srcGit : gitContext(destConn, { timeoutMs, job });
   const toGithub = mapping.type === 'github';
 
   const result = {
@@ -51,7 +49,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
   }
 
   try {
-    const before = await snapshotRefs(dir, srcEnv, timeoutMs);
+    const before = await snapshotRefs(dir, srcGit);
 
     if (dryRun && toDirectory) {
       result.status = 'planned';
@@ -101,7 +99,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
         report.createdProjects.push({ connection: mapping.connection, path: mapping.path });
       }
     } else if (toDirectory) {
-      const target = await directory.ensureTarget(mapping, { env: destEnv, timeoutMs });
+      const target = await directory.ensureTarget(mapping, { git: destGit });
       destUrl = target.url;
       if (target.created) {
         result.createdProject = true;
@@ -178,23 +176,22 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
     destUrl = destConn.sshUrl(mapping.path);
     }
 
-    const { cloned } = await fetchMirror(dir, repo.sshUrl, srcEnv, timeoutMs);
-    await pruneInternalRefs(dir, srcEnv, timeoutMs);
-    const after = await snapshotRefs(dir, srcEnv, timeoutMs);
+    const { cloned } = await fetchMirror(dir, repo.sshUrl, srcGit);
+    await pruneInternalRefs(dir, srcGit);
+    const after = await snapshotRefs(dir, srcGit);
 
     const deliver = () =>
       toDirectory
         ? directory.deliver(mapping, {
             mirrorDir: dir,
             target: destUrl,
-            env: destEnv,
-            timeoutMs,
+            git: destGit,
             defaultBranch: repo.defaultBranch ?? defaultBranchOf(after),
             pushMode: mapping.pushMode,
           })
-        : pushWithRelax({ dir, destUrl, destEnv, timeoutMs, mapping, project, destConn, result, rlog });
+        : pushWithRelax({ dir, destUrl, destGit, mapping, project, destConn, result, rlog });
 
-    result.usesLfs = await detectLfs(dir, srcEnv, timeoutMs, repo.defaultBranch);
+    result.usesLfs = await detectLfs(dir, srcGit, repo.defaultBranch);
 
     if (Object.keys(refsToState(after)).length === 0) {
       // git push with no matching refs exits 1. That is not a failure.
@@ -229,7 +226,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
 
     if (result.usesLfs) {
       if (source.mirror_lfs && lfsAvailable) {
-        await transferLfs(dir, repo.sshUrl, destUrl, srcEnv, destEnv, timeoutMs);
+        await transferLfs(dir, repo.sshUrl, destUrl, srcGit, destGit);
         result.lfsTransferred = true;
       } else {
         result.lfsWarning = source.mirror_lfs
@@ -246,22 +243,22 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
     const wrote = result.status !== 'unchanged' || result.createdProject || result.relaxedPushRules;
     const canVerify = !toDirectory || directory.verifiable(mapping);
     if (canVerify && (mapping.verify === 'always' || (mapping.verify === 'push' && wrote && !result.emptyRepo))) {
-      result.verification = await verifyDestination({ destUrl, destEnv, timeoutMs, expected: after });
+      result.verification = await verifyDestination({ destUrl, destGit, expected: after });
       if (!result.verification.ok) {
         throw new VerificationError(describeVerification(result.verification, result.destination));
       }
     }
 
     if (source.mirror_wikis && !toDirectory && !toGithub) {
-      result.wiki = await syncWiki({ repo, mapping, destConn, project, config, timeoutMs, srcEnv, destEnv, rlog });
+      result.wiki = await syncWiki({ repo, mapping, destConn, project, config, srcGit, destGit, rlog });
     }
 
     if (result.remapped && !toDirectory && !toGithub) {
-      result.remapped = await handleRemap({ mapping, previous, destConn, destEnv, timeoutMs, dryRun, rlog });
+      result.remapped = await handleRemap({ mapping, previous, destConn, destGit, dryRun, rlog });
     }
 
     const sizeBytes = await directorySize(dir);
-    state.repos[repo.fullPath] = {
+    await state.putRepo(repo.fullPath, {
       destination: result.destination,
       refs: refsToState(after),
       wiki: result.wiki?.refs ? { refs: result.wiki.refs, lastSuccess: new Date().toISOString() } : previous?.wiki ?? null,
@@ -272,7 +269,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
       sizeBytes,
       usesLfs: result.usesLfs,
       createdByService: previous?.createdByService || result.createdProject,
-    };
+    });
     result.sizeBytes = sizeBytes;
     result.consecutiveFailures = 0;
 
@@ -286,7 +283,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
     const message = err instanceof NamespaceError ? err.message : err.stderr ? `${err.message}\n${err.stderr}` : err.message;
 
     // Cut short by shutdown, so it must not count against the failure streak.
-    if (err.interrupted || (stopping() && err.signal)) {
+    if (err.interrupted || (job.stopping && err.signal)) {
       result.status = 'interrupted';
       result.error = message;
       rlog.warn('repository interrupted by shutdown', { repo: repo.fullPath });
@@ -297,7 +294,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
     result.status = 'failed';
     result.error = message;
     result.consecutiveFailures = failures;
-    state.repos[repo.fullPath] = {
+    await state.putRepo(repo.fullPath, {
       ...(previous ?? { refs: {}, wiki: null, lastSuccess: null, sizeBytes: 0, usesLfs: false }),
       // A project created before this run failed is still ours to clean up.
       createdByService: Boolean(previous?.createdByService || result.createdProject),
@@ -305,7 +302,7 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
       lastSeenAt: new Date().toISOString(),
       consecutiveFailures: failures,
       lastError: message,
-    };
+    });
     rlog.error('repository failed', { error: message, consecutiveFailures: failures });
     return result;
   }

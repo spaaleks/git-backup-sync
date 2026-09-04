@@ -9,8 +9,8 @@ import { promisify } from 'node:util';
 import { startFakeApi, glProject } from './fake-api.js';
 import { validate, configSchema } from '../src/config/schema.js';
 import { Connection, buildConnections } from '../src/connections.js';
-import { runSync, resetStop } from '../src/run.js';
-import { emptyState } from '../src/state.js';
+import { runSync } from '../src/run.js';
+import { memoryState } from '../src/state.js';
 import { buildRunMail, shouldNotify } from '../src/mail.js';
 import { setLevel } from '../src/logger.js';
 
@@ -64,9 +64,7 @@ test('a full sync: first run clones, second run is silent, a push produces one m
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const first = await runSync({ config, connections, state, reason: 'test' });
   assert.equal(first.fatal, null, first.fatal ?? '');
   assert.equal(first.totals.failed, 0, JSON.stringify(first.sources[0].repos, null, 2));
@@ -150,9 +148,7 @@ test('CI is disabled on the destination, at creation and on an existing project'
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   await runSync({ config, connections, state, reason: 'test' });
 
   const created = api.state.projects['mirror/infra/router'];
@@ -213,9 +209,7 @@ test('metadata is synced and the push is verified against the destination', asyn
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const first = await runSync({ config, connections, state, reason: 'test' });
   assert.equal(first.totals.failed, 0, JSON.stringify(first.sources[0].repos, null, 2));
 
@@ -269,9 +263,7 @@ test('a destination that silently alters the push fails verification', async (t)
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const report = await runSync({ config, connections, state, reason: 'test' });
 
   assert.equal(report.totals.failed, 1, 'a destination missing a ref is a failure, not a silent pass');
@@ -313,9 +305,7 @@ test('visibility is enforced on every run, not only at creation', async (t) => {
   const config = buildConfig(api, dataDir);
   config.sources[0].destination.visibility = 'original';
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   await runSync({ config, connections, state, reason: 'test' });
   assert.equal(api.state.projects['mirror/infra/router'].visibility, 'public', 'original follows the source');
 
@@ -375,9 +365,7 @@ test('--once with a source name runs only that source but still maps all of them
   config.sources[1].scope = { type: 'group', login: 'b', recursive: true, include_owned_groups: false, include_membership: false };
 
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const report = await runSync({ config, connections, state, reason: 'test', only: ['src-a'] });
 
   assert.deepEqual(report.sources.map((s) => s.name), ['src-a'], 'only the named source is synced');
@@ -422,9 +410,7 @@ test('a narrowed run still aborts on a collision with a source it is not syncing
   config.sources.push(structuredClone(config.sources[0]));
   config.sources[1].name = 'src-b';
   config.sources[1].scope = { type: 'group', login: 'b', recursive: true, include_owned_groups: false, include_membership: false };
-
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test', only: ['src-a'] });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test', only: ['src-a'] });
 
   assert.ok(report.fatal, 'narrowing the run must not narrow the collision check');
   assert.match(report.fatal, /collision/);
@@ -491,9 +477,7 @@ test('an interrupted repository is not counted as a failure', async (t) => {
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   await runSync({ config, connections, state, reason: 'test' });
   const before = state.sources.migration.repos['userA/infra/router'];
   assert.equal(before.consecutiveFailures, 0);
@@ -536,9 +520,7 @@ test('an empty source repository is not a failure', async (t) => {
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const report = await runSync({ config, connections, state, reason: 'test' });
   assert.equal(report.totals.failed, 0, JSON.stringify(report.sources[0].repos, null, 2));
   assert.equal(report.totals.new, 1);
@@ -583,9 +565,7 @@ test('archiving a repository on the source is not a disappearance', async (t) =>
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const first = await runSync({ config, connections, state, reason: 'test' });
   assert.equal(first.totals.new, 1);
 
@@ -639,9 +619,7 @@ test('a failing repository fails alone and carries a failure streak', async (t) 
 
   const config = buildConfig(api, dataDir);
   const connections = buildConnections(config);
-  const state = emptyState();
-
-  resetStop();
+  const state = await memoryState();
   const first = await runSync({ config, connections, state, reason: 'test' });
   assert.equal(first.totals.new, 1, 'the healthy repository still synced');
   assert.equal(first.totals.failed, 1);

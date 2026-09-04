@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node src/index.js",
     "check-config": "node src/index.js --check-config",
+    "seed:mail": "node test/fixtures/mail/seed.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "node --test --test-timeout=30000 test/*.test.js",
@@ -20,6 +21,7 @@
   },
   "dependencies": {
     "nodemailer": "^6.9.14",
+    "pg": "^8.23.0",
     "yaml": "^2.4.5"
   },
   "devDependencies": {

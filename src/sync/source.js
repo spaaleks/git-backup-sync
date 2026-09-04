@@ -1,8 +1,5 @@
-import { child } from '../logger.js';
-import { sourceState } from '../state.js';
 import { syncRepo } from './repository.js';
 import { emptySourceReport } from './report.js';
-import { stopping } from './stop.js';
 import { pool } from './pool.js';
 
 export async function runSource({
@@ -16,9 +13,10 @@ export async function runSource({
   mappingErrors,
   dryRun,
   lfsAvailable,
+  job,
 }) {
   const { source } = entry;
-  const slog = child({ source: source.name });
+  const slog = job.log({ source: source.name });
   const sr = emptySourceReport(entry);
   sr.filtered = entry.filtered?.length ?? 0;
   sr.skipped = entry.skipped?.length ?? 0;
@@ -36,16 +34,14 @@ export async function runSource({
 
   if (entry.error) {
     sr.error = entry.error.message;
-    const st = sourceState(state, source.name);
-    st.lastError = entry.error.message;
+    await (await state.source(source.name)).setError(entry.error.message);
     return sr;
   }
 
   if (preflightErrors.length) {
     sr.error = preflightErrors.join(' ');
     sr.preflight = preflightErrors;
-    const st = sourceState(state, source.name);
-    st.lastError = sr.error;
+    await (await state.source(source.name)).setError(sr.error);
     slog.error('source failed pre-flight', { problems: preflightErrors });
     return sr;
   }
@@ -55,8 +51,8 @@ export async function runSource({
     sr.counts.failed++;
   }
 
-  const st = sourceState(state, source.name);
-  st.connection = source.connection;
+  const st = await state.source(source.name);
+  await st.setConnection(source.connection);
 
   const srcConn = connections[source.connection];
   const destConn = connections[source.destination.connection];
@@ -79,7 +75,7 @@ export async function runSource({
   };
 
   const results = await pool(entry.mappings, config.concurrency, async (mapping) => {
-    if (stopping()) return { repo: mapping.repo.fullPath, status: 'skipped-stopping', destination: mapping.path };
+    if (job.stopping) return { repo: mapping.repo.fullPath, status: 'skipped-stopping', destination: mapping.path };
     return syncRepo({
       mapping,
       source,
@@ -92,8 +88,10 @@ export async function runSource({
       dryRun,
       timeoutMs,
       lfsAvailable,
+      job,
     });
   }, {
+    job,
     pauseMs,
     pauseWhen,
     onPause: (batch) =>
@@ -142,7 +140,6 @@ export async function runSource({
     sr.counts.vanished++;
   }
 
-  st.lastRunAt = new Date().toISOString();
-  st.lastError = null;
+  await st.finished();
   return sr;
 }

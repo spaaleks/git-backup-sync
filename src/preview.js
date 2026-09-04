@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { log } from './logger.js';
-import { loadState, orphanedSources } from './state.js';
+import { openState, orphanedSources } from './state.js';
 import { buildConnections } from './connections.js';
 import { Notifier } from './notify/index.js';
 import { buildRunMail, buildHeartbeatMail } from './mail.js';
@@ -68,7 +68,15 @@ function reportFromState(config, state) {
 }
 
 export async function previewMail(config, { htmlPath = null, kind = 'run' } = {}) {
-  const state = await loadState(config.data_dir);
+  const state = await openState(config.database);
+  try {
+    return await render(config, state, { htmlPath, kind });
+  } finally {
+    await state.close();
+  }
+}
+
+async function render(config, state, { htmlPath, kind }) {
   const connections = buildConnections(config);
 
   const message =

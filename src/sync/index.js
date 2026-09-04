@@ -1,20 +1,22 @@
 import { log } from '../logger.js';
 import { orphanedSources } from '../state.js';
-import { acquire, LockBusyError } from '../lock.js';
+import { openLock, LockBusyError } from '../lock.js';
 import { hasGitLfs } from '../mirror.js';
+import { Job } from '../job.js';
 import { enumerateAll, resolveAll, preflight } from './preflight.js';
 import { runSource } from './source.js';
 import { pruneMirrors } from './prune.js';
 import { emptySourceReport, classifyMoves, totalsOf } from './report.js';
-import { stopping } from './stop.js';
 
-export async function runSync({ config, connections, state, reason = 'scheduled', only = null }) {
+export async function runSync({ config, connections, state, reason = 'scheduled', only = null, job, lock }) {
   const dryRun = config.dry_run;
   const startedAt = new Date();
+  job ??= new Job({ reason, secrets: Object.values(connections).map((c) => c.token) });
+  lock ??= await openLock(config, state.store);
   let release = () => {};
 
   try {
-    release = await acquire(config.data_dir);
+    release = await lock.acquire();
   } catch (err) {
     if (err instanceof LockBusyError) {
       log.warn('skipping this run, a sync is already in progress', { error: err.message });
@@ -81,17 +83,18 @@ export async function runSync({ config, connections, state, reason = 'scheduled'
         mappingErrors: mappingErrors.filter((e) => e.source === entry.source.name),
         dryRun,
         lfsAvailable,
+        job,
       });
       report.sources.push(sourceReport);
-      if (stopping()) {
+      if (job.stopping) {
         report.stopped = true;
         log.warn('stop requested, ending the run after the current source');
         break;
       }
     }
 
-    classifyMoves(report, state);
-    if (config.prune_mirrors && !dryRun && !stopping() && !selected) await pruneMirrors(config, state, report);
+    await classifyMoves(report, state);
+    if (config.prune_mirrors && !dryRun && !job.stopping && !selected) await pruneMirrors(config, state, report);
     return finish(report, state, config, startedAt);
   } catch (err) {
     log.error('sync run failed unexpectedly', { error: err.message, stack: err.stack });
@@ -102,21 +105,24 @@ export async function runSync({ config, connections, state, reason = 'scheduled'
   }
 }
 
-function finish(report, state, config, startedAt) {
+async function finish(report, state, config, startedAt) {
   report.finishedAt = new Date().toISOString();
   report.durationMs = Date.now() - startedAt.getTime();
   report.totals = totalsOf(report);
 
-  state.runs.push({
-    startedAt: report.startedAt,
-    durationMs: report.durationMs,
-    reason: report.reason,
-    dryRun: report.dryRun,
-    changed: report.totals.changed + report.totals.new + report.totals.moved,
-    failed: report.totals.failed,
-    fatal: report.fatal ? report.fatal.split('\n')[0] : null,
-    bySource: Object.fromEntries(report.sources.map((s) => [s.name, { changed: s.counts.changed + s.counts.new, failed: s.counts.failed }])),
-  });
+  await state.addRun(
+    {
+      startedAt: report.startedAt,
+      durationMs: report.durationMs,
+      reason: report.reason,
+      dryRun: report.dryRun,
+      changed: report.totals.changed + report.totals.new + report.totals.moved,
+      failed: report.totals.failed,
+      fatal: report.fatal ? report.fatal.split('\n')[0] : null,
+      bySource: Object.fromEntries(report.sources.map((s) => [s.name, { changed: s.counts.changed + s.counts.new, failed: s.counts.failed }])),
+    },
+    { keep: config.keep_runs },
+  );
 
   log.info('sync run finished', {
     durationMs: report.durationMs,
