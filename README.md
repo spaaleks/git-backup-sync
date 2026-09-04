@@ -1,7 +1,6 @@
 # git-backup-sync
 
 ![version](https://img.shields.io/badge/version-1.0.0-blue?style=for-the-badge&logo=github)
-![license](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 ![docker hub](https://img.shields.io/badge/docker%20hub-spaaleks%2Fgit--backup--sync-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![quay](https://img.shields.io/badge/quay.io-spaaleks%2Fgit--backup--sync-EE0000?style=for-the-badge&logo=redhat&logoColor=white)
 
