@@ -75,6 +75,12 @@ export function buildRunMail(report, config) {
         for (const change of listChanges(r.changes)) lines.push(`      ${change}`);
       }
       if (r.createdProject) lines.push('    created the destination project');
+      if (r.seeded) {
+        lines.push(
+          `    too large for one push: ${r.seeded.commits} commits of ${r.seeded.branch} were delivered in ` +
+            `${r.seeded.slices} slices over ${r.seeded.seconds}s`,
+        );
+      }
       if (r.emptyRepo) lines.push('    the source repository is empty, nothing was pushed');
       if (r.disabledCi) lines.push('    disabled CI on the destination project');
       if (r.visibilityChanged) lines.push(`    changed visibility from ${r.visibilityChanged.from} to ${r.visibilityChanged.to}`);
@@ -370,6 +376,7 @@ function detailFor(r) {
   if (r.changes?.changed) bits.push(escapeHtml(describeChanges(r.changes)));
   if (r.emptyRepo) bits.push('source repository is empty');
   if (r.createdProject) bits.push('created the destination project');
+  if (r.seeded) bits.push(`delivered ${r.seeded.commits} commits of ${escapeHtml(r.seeded.branch)} in ${r.seeded.slices} slices`);
   for (const g of r.createdGroups ?? []) bits.push(`created group ${escapeHtml(g)}`);
   if (r.relaxedPushRules) bits.push(r.relaxedPushRules.retrySucceeded === false ? 'push rules relaxed, still rejected' : 'relaxed the destination push rules');
   if (r.disabledCi) bits.push('disabled CI');

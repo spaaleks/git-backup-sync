@@ -9,6 +9,7 @@ import {
   detectLfs,
   transferLfs,
   directorySize,
+  slicePolicy,
 } from '../mirror.js';
 import { diffRefs, refsToState, describeChanges } from '../diff.js';
 import { pushWithRelax } from './push-rules.js';
@@ -26,8 +27,11 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
   const previous = state.repos[repo.fullPath];
   const dir = mirrorDir(config.data_dir, source.name, repo.fullPath);
   const toDirectory = mapping.type === 'directory';
-  const srcGit = gitContext(srcConn, { timeoutMs, job });
-  const destGit = toDirectory ? srcGit : gitContext(destConn, { timeoutMs, job });
+  const slice = slicePolicy(config);
+  const srcGit = gitContext(srcConn, { timeoutMs, job, log: rlog });
+  const destGit = toDirectory
+    ? gitContext(srcConn, { timeoutMs, job, slice, log: rlog })
+    : gitContext(destConn, { timeoutMs, job, slice, log: rlog });
   const toGithub = mapping.type === 'github';
 
   const result = {
@@ -42,6 +46,10 @@ export async function syncRepo({ mapping, source, srcConn, destConn, resolver, s
     wiki: null,
     usesLfs: false,
     consecutiveFailures: previous?.consecutiveFailures ?? 0,
+  };
+
+  destGit.onSeed = (seeded) => {
+    result.seeded = seeded;
   };
 
   if (previous?.destination && previous.destination !== result.destination) {
