@@ -3,12 +3,20 @@ import path from 'node:path';
 import { log } from './logger.js';
 import { buildConnections } from './connections.js';
 import * as gitlab from './providers/gitlab.js';
-import { loadState, saveState } from './state.js';
+import { openState } from './state.js';
 import { directorySize, listMirrors } from './mirror.js';
 import { formatBytes } from './mail.js';
 
-export async function cleanup(config, { source: sourceName, yes = false, force = false, keepState = false }) {
-  const state = await loadState(config.data_dir);
+export async function cleanup(config, { source: sourceName, yes = false, force = false, keepState = false, purge = false }) {
+  const state = await openState(config.database);
+  try {
+    return await run(config, state, { sourceName, yes, force, keepState, purge });
+  } finally {
+    await state.close();
+  }
+}
+
+async function run(config, state, { sourceName, yes, force, keepState, purge }) {
   const sourceState = state.sources[sourceName];
 
   if (!sourceState) {
@@ -41,7 +49,7 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
 
     let project;
     try {
-      project = await gitlab.getProject(connection, projectPath);
+      project = await gitlab.getProject(connection, projectPath, { followRedirect: true });
     } catch (err) {
       unreachable.push({ fullPath, destination: record.destination, reason: err.message });
       continue;
@@ -56,6 +64,8 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
       project,
       empty: Boolean(project.empty_repo),
       createdByService: Boolean(record.createdByService),
+      pending: gitlab.markedForDeletion(project),
+      currentPath: project.path_with_namespace ?? projectPath,
     });
   }
 
@@ -66,6 +76,7 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
   log.print('-'.repeat(78));
   for (const t of targets) {
     const flags = [t.empty ? 'empty' : 'HAS COMMITS', t.createdByService ? 'created by this service' : 'not recorded as ours'];
+    if (t.pending) flags.push('already marked for deletion');
     log.print(`  ${t.connectionName}:${t.projectPath}`);
     log.print(`    from ${t.fullPath}  [${flags.join(', ')}]`);
   }
@@ -91,6 +102,11 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
   if (!force && withContent.length) {
     log.print(`  keep ${withContent.length} project${withContent.length === 1 ? '' : 's'} that have commits. Add --force to delete those too.`);
   }
+  log.print(
+    purge
+      ? '  purge them outright (--purge), leaving no scheduled-deletion copy and no redirect'
+      : '  let the instance decide when the delete becomes permanent. Add --purge to remove them outright.',
+  );
   log.print(`  remove ${mirrors.length} local mirror director${mirrors.length === 1 ? 'y' : 'ies'} (${formatBytes(mirrorBytes)})`);
   log.print(keepState ? '  keep the state entry (--keep-state)' : `  forget the state entry for "${sourceName}"`);
   log.print('');
@@ -106,12 +122,26 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
   }
 
   let deleted = 0;
+  let purged = 0;
   let failed = 0;
   for (const t of deletable) {
     try {
-      await gitlab.deleteProject(t.connection, t.project.id);
+      if (!t.pending) await gitlab.deleteProject(t.connection, t.project.id);
       deleted++;
       log.print(`  deleted ${t.connectionName}:${t.projectPath}`);
+      if (purge) {
+        const current = await gitlab
+          .getProject(t.connection, t.projectPath, { followRedirect: true })
+          .catch(() => null);
+        if (current && gitlab.markedForDeletion(current)) {
+          await gitlab.deleteProject(t.connection, current.id, {
+            permanently: true,
+            fullPath: current.path_with_namespace,
+          });
+          purged++;
+          log.print(`  purged ${t.connectionName}:${current.path_with_namespace}`);
+        }
+      }
     } catch (err) {
       failed++;
       log.print(`  FAILED to delete ${t.connectionName}:${t.projectPath}: ${err.message}`);
@@ -126,20 +156,23 @@ export async function cleanup(config, { source: sourceName, yes = false, force =
   await rm(path.join(config.data_dir, 'mirrors', sourceName), { recursive: true, force: true }).catch(() => {});
 
   if (!keepState && failed === 0) {
-    delete state.sources[sourceName];
-    await saveState(config.data_dir, state, { keepRuns: config.keep_runs });
+    await state.forgetSource(sourceName);
   } else if (!keepState) {
     log.print('');
     log.print(`state for "${sourceName}" was kept because ${failed} deletion(s) failed. Fix the cause and re-run.`);
   }
 
   log.print('');
-  log.print(`done: ${deleted} project(s) deleted, ${failed} failed, ${mirrors.length} mirror director(ies) removed.`);
-  if (deleted > 0) {
+  log.print(
+    `done: ${deleted} project(s) deleted, ${purged} purged, ${failed} failed, ${mirrors.length} mirror director(ies) removed.`,
+  );
+  if (deleted > purged) {
     log.print('');
-    log.print('Note: if the instance has delayed project deletion enabled, GitLab renames each');
-    log.print('project to "<path>-deletion_scheduled-<id>" and purges it after the retention');
-    log.print('period. They stay visible until then. That is expected, not a failed delete.');
+    log.print('Note: with delayed project deletion enabled, GitLab renames each project to');
+    log.print('"<path>-deletion_scheduled-<id>" and purges it after the retention period. Until');
+    log.print('then the old path answers the API with the doomed project, which refuses pushes.');
+    log.print('Sync treats such a path as free and creates a new project. Use --purge to remove');
+    log.print('them outright instead.');
   }
   if (!keepState) log.print(`state for "${sourceName}" was forgotten, so the next run treats every repository as new.`);
   return failed === 0 ? 0 : 1;

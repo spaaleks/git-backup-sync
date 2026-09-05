@@ -9,8 +9,8 @@ import { promisify } from 'node:util';
 
 import { validate, configSchema } from '../src/config/schema.js';
 import { buildConnections } from '../src/connections.js';
-import { runSync, resetStop } from '../src/run.js';
-import { emptyState } from '../src/state.js';
+import { runSync } from '../src/run.js';
+import { memoryState, openState } from '../src/state.js';
 import { setLevel } from '../src/logger.js';
 import { parseGitUrl } from '../src/providers/git.js';
 
@@ -83,8 +83,7 @@ test('a url list with no credentials mirrors into bare repositories', async (t) 
   const out = path.join(root, 'backup');
 
   const config = buildConfig({ dataDir: path.join(root, 'data'), out, urls: [src], format: 'bare' });
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
 
   assert.equal(report.totals.failed, 0, JSON.stringify(report.sources[0].repos, null, 2));
   assert.equal(report.totals.new, 1);
@@ -100,8 +99,36 @@ test('a url list with no credentials mirrors into bare repositories', async (t) 
   await git(['clone', '--quiet', target, restored]);
   assert.equal(await readFile(path.join(restored, 'a.txt'), 'utf8'), 'hello\n');
 
-  const second = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const second = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
   assert.equal(second.totals.failed, 0);
+});
+
+test('the state store on disk survives a restart', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gbs-store-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const src = path.join(root, 'origin/acme/infra/router.git');
+  await makeRepo(src);
+  const dataDir = path.join(root, 'data');
+  const config = buildConfig({ dataDir, out: path.join(root, 'backup'), urls: [src], format: 'bare' });
+  const database = { driver: 'sqlite', path: path.join(dataDir, 'nested', 'state.db') };
+
+  const first = await openState(database);
+  const report = await runSync({ config, connections: buildConnections(config), state: first, reason: 'test' });
+  assert.equal(report.totals.new, 1, JSON.stringify(report.sources[0].repos, null, 2));
+  await first.close();
+
+  const reopened = await openState(database);
+  const record = reopened.sources.links.repos[derived(src)];
+  assert.ok(record, 'the repository was committed as it finished, not at the end of the run');
+  assert.equal(record.consecutiveFailures, 0);
+  assert.equal(Object.keys(record.refs).length, 2);
+  assert.equal(reopened.runs.length, 1);
+  assert.equal(reopened.sources.links.connection, 'anon');
+
+  const second = await runSync({ config, connections: buildConnections(config), state: reopened, reason: 'test' });
+  assert.equal(second.totals.unchanged, 1, 'the reopened store is recognised, not treated as a first run');
+  await reopened.close();
 });
 
 test('a worktree destination leaves browsable files', async (t) => {
@@ -113,14 +140,13 @@ test('a worktree destination leaves browsable files', async (t) => {
   const out = path.join(root, 'files');
 
   const config = buildConfig({ dataDir: path.join(root, 'data'), out, urls: [src], format: 'worktree' });
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
 
   assert.equal(report.totals.failed, 0, JSON.stringify(report.sources[0].repos, null, 2));
   const checkout = path.join(out, derived(src));
   assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'hello\n', 'the files are just there');
 
-  const again = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const again = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
   assert.equal(again.totals.failed, 0);
 });
 
@@ -136,8 +162,7 @@ test('an inline destination pins one repository to one path', async (t) => {
   const out = path.join(root, 'backup');
   const urls = [a, { url: b, destination: 'renamed/elsewhere/two' }];
   const config = buildConfig({ dataDir: path.join(root, 'data'), out, urls, format: 'bare' });
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
 
   assert.equal(report.totals.failed, 0, JSON.stringify(report.sources[0].repos, null, 2));
   assert.equal(report.totals.new, 2);
@@ -164,8 +189,7 @@ test('two urls pinned to the same target abort pre-flight', async (t) => {
     ],
     format: 'bare',
   });
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
 
   assert.ok(report.fatal, 'the collision check applies to folders too');
   assert.match(report.fatal, /collision/);

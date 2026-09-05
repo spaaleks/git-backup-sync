@@ -1,5 +1,6 @@
 import { log } from './logger.js';
 import { redactedConfig } from './config/load.js';
+import { openState } from './state.js';
 import { buildConnections } from './connections.js';
 import { enumerateAll, resolveAll, preflight } from './run.js';
 import { resolveMapping } from './mapping.js';
@@ -16,6 +17,16 @@ export function printConfigDump(config) {
 function stripInternals(config) {
   const { configPath, ...rest } = config;
   return { config_path: configPath, ...rest };
+}
+
+export async function dumpState(config) {
+  const state = await openState(config.database);
+  try {
+    log.print(JSON.stringify(await state.dump(), null, 2));
+  } finally {
+    await state.close();
+  }
+  return 0;
 }
 
 export async function checkConfig(config, { verbose = true } = {}) {

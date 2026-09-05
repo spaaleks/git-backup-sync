@@ -17,7 +17,7 @@
 #     docker compose run --rm sync --check-config
 # ---------------------------------------------------------------------------
 
-# Mirrors and state.json live here. Use a volume.
+# Mirrors and the state database live here. Use a volume.
 data_dir: /data
 
 # Repositories in flight per source.
@@ -50,7 +50,7 @@ timezone: Europe/Berlin
 # Kill any git invocation that hangs longer than this.
 git_timeout_minutes: 30
 
-# Run records retained in state.json.
+# Run records retained in the state database.
 keep_runs: 30
 
 # Remove mirror directories nothing references any more. A repository that
@@ -62,6 +62,31 @@ schedule:
   sync: "0 3 * * *"
   # Mondays at 08:00. Omit or set null to disable.
   heartbeat: "0 8 * * 1"
+
+# ---------------------------------------------------------------------------
+# Database: where state lives. Every field also reads from an environment
+# variable (DB_DRIVER, DB_PATH, DB_HOST, DB_PORT, DB_NAME, DB_USER,
+# DB_PASSWORD, DB_SSL, DB_SSL_CA, DB_POOL_MAX), and the file wins over it.
+# The whole block can be omitted: it defaults to sqlite at ${data_dir}/state.db.
+# ---------------------------------------------------------------------------
+database:
+  # sqlite | postgres. Explicit, never inferred from whether `host` is set.
+  driver: sqlite
+  path: /data/state.db
+
+  # postgres instead. Setting any of these while driver is sqlite is an error,
+  # not a silently ignored line. Postgres also swaps the run lockfile for an
+  # advisory lock, which the server releases when the connection drops.
+  # driver: postgres
+  # host: db.example.com
+  # port: 5432
+  # name: gitbackupsync
+  # user: gitbackupsync
+  # password: ${DB_PASSWORD}
+  # libpq meanings: require encrypts, verify-full also authenticates the server.
+  # ssl: verify-full
+  # ssl_ca: /run/secrets/db-ca.pem
+  # pool_max: 10
 
 # ---------------------------------------------------------------------------
 # Connections: every credential the service holds, named once. Sources and
@@ -118,6 +143,7 @@ smtp:
   user: ${SMTP_USER:-}
   password: ${SMTP_PASS:-}
   from: ${SMTP_FROM}
+  from_name: ${SMTP_FROM_NAME:-git-backup-sync}
   # Quote it: inside [ ], a bare ${...} is not valid YAML.
   to: ["${SMTP_TO}"]
   # Or [always], or [failures].

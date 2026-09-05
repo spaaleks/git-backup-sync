@@ -68,6 +68,7 @@ export async function loadConfig({ path, env = process.env } = {}) {
   }
 
   const { value: interpolated } = interpolate(doc, { env, configPath: path });
+  applyDatabaseEnv(interpolated, env);
 
   let config;
   try {
@@ -79,15 +80,69 @@ export async function loadConfig({ path, env = process.env } = {}) {
 
   config.timezone ??= env.TZ || 'UTC';
   crossCheck(config, path);
+  resolveDatabase(config);
   resolveInheritance(config);
 
   config.configPath = path;
   return deepFreeze(config);
 }
 
+const DB_ENV = {
+  driver: 'DB_DRIVER',
+  path: 'DB_PATH',
+  host: 'DB_HOST',
+  port: 'DB_PORT',
+  name: 'DB_NAME',
+  user: 'DB_USER',
+  password: 'DB_PASSWORD',
+  ssl: 'DB_SSL',
+  ssl_ca: 'DB_SSL_CA',
+  pool_max: 'DB_POOL_MAX',
+};
+
+const POSTGRES_ONLY = ['host', 'port', 'name', 'user', 'password', 'ssl', 'ssl_ca', 'pool_max'];
+
+function applyDatabaseEnv(doc, env) {
+  const database = (doc.database ??= {});
+  for (const [key, variable] of Object.entries(DB_ENV)) {
+    if (database[key] === undefined && env[variable] !== undefined && env[variable] !== '') {
+      database[key] = env[variable];
+    }
+  }
+}
+
+function checkDatabase(config, add) {
+  const db = config.database;
+  if (db.driver === 'postgres') {
+    if (db.path) add('database.path', 'applies to `driver: sqlite`, not postgres');
+    for (const key of ['host', 'name', 'user']) {
+      if (!db[key]) add(`database.${key}`, `is required for \`driver: postgres\` (${DB_ENV[key]})`);
+    }
+    return;
+  }
+  for (const key of POSTGRES_ONLY) {
+    if (db[key] !== undefined && db[key] !== null) {
+      add(`database.${key}`, 'applies to `driver: postgres`, not sqlite');
+    }
+  }
+}
+
+function resolveDatabase(config) {
+  const db = config.database;
+  if (db.driver === 'postgres') {
+    db.port ??= 5432;
+    db.ssl ??= 'require';
+    db.pool_max ??= 10;
+    return;
+  }
+  db.path ??= `${config.data_dir.replace(/\/+$/, '')}/state.db`;
+}
+
 function crossCheck(config, path) {
   const errors = [];
   const add = (p, m) => errors.push(`  ${p}: ${m}`);
+
+  checkDatabase(config, add);
 
   for (const [name, conn] of Object.entries(config.connections)) {
     const p = `connections.${name}`;

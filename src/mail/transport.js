@@ -13,12 +13,21 @@ export function createTransport(smtp) {
   });
 }
 
+export function fromField(smtp) {
+  const raw = String(smtp.from ?? '').trim();
+  const angled = raw.match(/<([^>]*)>\s*$/);
+  const address = angled ? angled[1].trim() : raw;
+  const inline = angled ? raw.slice(0, angled.index).trim().replace(/^"(.*)"$/, '$1') : '';
+  const name = String(smtp.from_name ?? '').trim() || inline;
+  return name ? { name, address } : address;
+}
+
 export async function send(transport, smtp, message) {
   const attempts = (smtp.retries ?? 3) + 1;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const info = await transport.sendMail({
-        from: smtp.from,
+        from: fromField(smtp),
         to: smtp.to.join(', '),
         subject: message.subject,
         text: message.text,

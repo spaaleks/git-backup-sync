@@ -23,6 +23,7 @@ smtp:
   user: ${SMTP_USER:-}
   password: ${SMTP_PASS:-}
   from: ${SMTP_FROM}
+  from_name: ${SMTP_FROM_NAME:-git-backup-sync}
   to: [ "${SMTP_TO}" ]
 
 sources:

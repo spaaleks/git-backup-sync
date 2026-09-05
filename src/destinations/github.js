@@ -50,8 +50,8 @@ export async function prepare(mapping, { connection, rlog }) {
   return { url: connection.sshUrl(mapping.path), target: repo, created };
 }
 
-export async function deliver(mapping, { mirrorDir, target, env, timeoutMs, pushMode }) {
-  await pushMirror(mirrorDir, target, env, timeoutMs, pushMode);
+export async function deliver(mapping, { mirrorDir, target, git, pushMode }) {
+  await pushMirror(mirrorDir, target, git, pushMode);
 }
 
 export async function afterPush(mapping, { connection, project, source, pushedRefs, result, rlog }) {

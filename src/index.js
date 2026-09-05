@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { log, setLevel, setLogStream, registerSecret } from './logger.js';
 import { loadConfig, ConfigError, DEFAULT_CONFIG_PATH } from './config/load.js';
-import { loadState } from './state.js';
-import { resetStop } from './run.js';
-import { checkConfig, explain, printConfigDump } from './cli.js';
+import { openState } from './state.js';
+import { checkConfig, explain, printConfigDump, dumpState } from './cli.js';
 import { cleanup } from './cleanup.js';
 import { unlock } from './unlock.js';
 import { previewMail } from './preview.js';
@@ -14,13 +13,17 @@ const USAGE = `git-backup-sync
   git-backup-sync                     run the scheduler (the container default)
   git-backup-sync --check-config      validate, resolve every mapping, print the plan
   git-backup-sync --explain <repo>    show how one repository resolves
-  git-backup-sync --cleanup <source>  undo a source: list what would be removed
-                                      (add --yes to apply, --force to include
-                                      projects that have commits)
+  git-backup-sync --cleanup <source>  undo what a source wrote: list the
+                                      destination projects, mirrors and state
+                                      that would be removed. The source is not
+                                      touched. (add --yes to apply, --force to
+                                      include destinations that have commits,
+                                      --purge to skip the deletion delay)
   git-backup-sync --once [source...]  run one sync now and exit. With no source,
                                       every enabled source runs.
   git-backup-sync --heartbeat         send a heartbeat mail now and exit
   git-backup-sync --unlock            show the sync lock, remove it if stale
+  git-backup-sync --state             print the state store as JSON
   git-backup-sync --preview-mail      render a report from stored state and send
                                       it, contacting no repository
                                       [--heartbeat-template] [--html <path>]
@@ -45,6 +48,7 @@ function parseArgs(argv) {
     else if (arg === '--heartbeat') args.mode = 'heartbeat';
     else if (arg === '--health') args.mode = 'health';
     else if (arg === '--unlock') args.mode = 'unlock';
+    else if (arg === '--state') args.mode = 'state';
     else if (arg === '--preview-mail') args.mode = 'preview-mail';
     else if (arg === '--heartbeat-template') args.previewKind = 'heartbeat';
     else if (arg === '--html') args.htmlPath = argv[++i];
@@ -67,6 +71,8 @@ function parseArgs(argv) {
       args.force = true;
     } else if (arg === '--keep-state') {
       args.keepState = true;
+    } else if (arg === '--purge') {
+      args.purge = true;
     } else if (arg === '--config') {
       args.config = argv[++i];
     } else if (!arg.startsWith('-') && args.mode === 'once') {
@@ -91,7 +97,7 @@ async function main() {
 
   if (args.mode === 'help') {
     process.stdout.write(USAGE);
-    process.exit(0);
+    await exitCleanly(0);
   }
 
   let config;
@@ -100,35 +106,42 @@ async function main() {
   } catch (err) {
     if (err instanceof ConfigError || err.name === 'InterpolationError') {
       process.stderr.write(`${err.message}\n`);
-      process.exit(1);
+      await exitCleanly(1);
     }
     throw err;
   }
   setLevel(config.log_level);
   for (const conn of Object.values(config.connections)) registerSecret(conn.token);
   if (config.smtp?.password) registerSecret(config.smtp.password);
+  if (config.database?.password) registerSecret(config.database.password);
 
   if (args.mode === 'check-config' || args.mode === 'explain') {
     setLogStream(process.stderr);
     setLevel('warn');
-    process.exit(args.mode === 'check-config' ? await checkConfig(config) : await explain(config, args.query));
+    await exitCleanly(args.mode === 'check-config' ? await checkConfig(config) : await explain(config, args.query));
   }
 
   if (args.mode === 'cleanup') {
     setLogStream(process.stderr);
     setLevel('warn');
-    process.exit(await cleanup(config, { source: args.source, yes: args.yes, force: args.force, keepState: args.keepState }));
+    await exitCleanly(await cleanup(config, { source: args.source, yes: args.yes, force: args.force, keepState: args.keepState, purge: args.purge }));
   }
-  if (args.mode === 'health') process.exit(await healthCommand(config));
+  if (args.mode === 'health') await exitCleanly(await healthCommand(config));
 
   if (args.mode === 'preview-mail') {
-    process.exit(await previewMail(config, { htmlPath: args.htmlPath, kind: args.previewKind }));
+    await exitCleanly(await previewMail(config, { htmlPath: args.htmlPath, kind: args.previewKind }));
   }
 
   if (args.mode === 'unlock') {
     setLogStream(process.stderr);
     setLevel('warn');
-    process.exit(await unlock(config, { force: args.force }));
+    await exitCleanly(await unlock(config, { force: args.force }));
+  }
+
+  if (args.mode === 'state') {
+    setLogStream(process.stderr);
+    setLevel('warn');
+    await exitCleanly(await dumpState(config));
   }
 
   const service = new Service(config);
@@ -161,26 +174,27 @@ async function main() {
           `no source named ${unknown.map((n) => `"${n}"`).join(', ')} in ${config.configPath}. ` +
             `Known sources: ${[...known].join(', ')}\n`,
         );
-        process.exit(2);
+        await exitCleanly(2);
       }
     }
     printConfigDump(config);
-    service.state = await loadState(config.data_dir);
-    resetStop();
+    service.state = await openState(config.database);
     const report = await service.sync('manual', args.only);
-    process.exit(report.fatal || report.totals?.failed ? 1 : 0);
+    await service.state.close();
+    await exitCleanly(report.fatal || report.totals?.failed ? 1 : 0);
   }
 
   if (args.mode === 'heartbeat') {
-    service.state = await loadState(config.data_dir);
+    service.state = await openState(config.database);
     await service.heartbeat();
-    process.exit(0);
+    await service.state.close();
+    await exitCleanly(0);
   }
 
   await service.start();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   log.error('fatal', { error: err.message, stack: err.stack });
-  process.exit(1);
+  await exitCleanly(1);
 });

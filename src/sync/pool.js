@@ -1,39 +1,37 @@
-import { stopping } from './stop.js';
-
 // Deliberately not unref'd: during a pause this is often the only thing pending,
 // and an unref'd timer would let the process exit cleanly in the middle of a run.
 // Polled so a shutdown signal does not have to wait out the whole pause.
-async function pause(ms) {
+async function pause(ms, job) {
   const until = Date.now() + ms;
   while (Date.now() < until) {
-    if (stopping()) return;
+    if (job.stopping) return;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
   }
 }
 
-export async function pool(items, limit, worker, { pauseMs = 0, pauseWhen = () => true, onPause } = {}) {
+export async function pool(items, limit, worker, { job, pauseMs = 0, pauseWhen = () => true, onPause } = {}) {
   const size = Math.max(1, Math.min(limit, items.length));
-  if (pauseMs <= 0) return continuousPool(items, size, worker);
+  if (pauseMs <= 0) return continuousPool(items, size, worker, job);
 
   const results = [];
   for (let i = 0; i < items.length; i += size) {
-    if (stopping()) break;
+    if (job.stopping) break;
     const batch = items.slice(i, i + size);
     const done = await Promise.all(batch.map((item, j) => worker(item, i + j)));
     const settled = done.filter((r) => r !== undefined);
     results.push(...settled);
 
-    if (i + size >= items.length || stopping()) continue;
+    if (i + size >= items.length || job.stopping) continue;
     // The pause exists to go easy on the servers, so a batch that transferred
     // nothing has nothing to recover from.
     if (!pauseWhen(settled)) continue;
     onPause?.(settled);
-    await pause(pauseMs);
+    await pause(pauseMs, job);
   }
   return results;
 }
 
-async function continuousPool(items, size, worker) {
+async function continuousPool(items, size, worker, job) {
   const results = new Array(items.length);
   let cursor = 0;
 
@@ -42,7 +40,7 @@ async function continuousPool(items, size, worker) {
       for (;;) {
         const index = cursor++;
         if (index >= items.length) return;
-        if (stopping()) return;
+        if (job.stopping) return;
         results[index] = await worker(items[index], index);
       }
     }),
