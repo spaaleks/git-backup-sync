@@ -132,6 +132,8 @@ export const configSchema = S.object({
   log_level: S.string({ enum: ['error', 'warn', 'info', 'debug'], default: 'info' }),
   timezone: S.string({ nonEmpty: true }),
   git_timeout_minutes: S.number({ min: 1, max: 720, default: 30 }),
+  slice_large_pushes: S.boolean({ default: true }),
+  slice_threshold_mb: S.number({ integer: true, min: 1, max: 1_000_000, default: 1024 }),
   keep_runs: S.number({ integer: true, min: 1, max: 1000, default: 30 }),
   prune_mirrors: S.boolean({ default: true }),
 
