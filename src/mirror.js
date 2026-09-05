@@ -58,8 +58,8 @@ export class GitRegistry {
   }
 }
 
-export function gitContext(connection, { timeoutMs, job }) {
-  return { env: gitEnv(connection), timeoutMs, registry: job?.git ?? null };
+export function gitContext(connection, { timeoutMs, job, slice = null, log = null }) {
+  return { env: gitEnv(connection), timeoutMs, registry: job?.git ?? null, slice, log };
 }
 
 export function withTimeout(git, ms) {
@@ -108,9 +108,9 @@ export function runGit(args, { cwd, env = {}, timeoutMs = 30 * 60_000, input, re
       clearTimeout(timer);
       if (timedOut) {
         const limit = timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} minutes` : `${Math.round(timeoutMs / 1000)}s`;
-        reject(
-          new GitError(`git ${args[0]} timed out after ${limit}`, { stderr: stderr.trim(), args }),
-        );
+        const err = new GitError(`git ${args[0]} timed out after ${limit}`, { stderr: stderr.trim(), args });
+        err.timedOut = true;
+        reject(err);
         return;
       }
       if (code !== 0) {
@@ -195,7 +195,152 @@ export async function fetchMirror(dir, sshUrl, git) {
   return { cloned: false };
 }
 
+export function slicePolicy(config) {
+  return {
+    enabled: config.slice_large_pushes,
+    thresholdBytes: config.slice_threshold_mb * 1024 * 1024,
+  };
+}
+
+const SLICE_FIRST = 8;
+const SLICE_SHARE = 0.5;
+const SLICE_GROWTH = 4;
+const SLICE_HEADS = 25;
+
+async function objectBytes(dir, git) {
+  const { stdout } = await runGit(['count-objects', '-v'], { cwd: dir, ...withTimeout(git, 60_000) });
+  // count-objects reports KiB, and loose objects are not in size-pack.
+  const kib = (key) => Number(new RegExp(`^${key}: (\\d+)$`, 'm').exec(stdout)?.[1] ?? 0);
+  return (kib('size') + kib('size-pack')) * 1024;
+}
+
+async function countRevs(dir, git, args) {
+  const { stdout } = await runGit(['rev-list', '--count', ...args], { cwd: dir, ...withTimeout(git, 10 * 60_000) });
+  return Number(stdout.trim()) || 0;
+}
+
+async function destinationTips(dir, destUrl, git) {
+  const shas = [...new Set((await remoteRefs(destUrl, withTimeout(git, 10 * 60_000))).values())];
+  if (!shas.length) return [];
+
+  const { stdout: types } = await runGit(['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
+    cwd: dir,
+    ...withTimeout(git, 60_000),
+    input: `${shas.join('\n')}\n`,
+  });
+  return types
+    .split('\n')
+    .map((l) => l.trim().split(' '))
+    .filter(([, type]) => type === 'commit' || type === 'tag')
+    .map(([sha]) => sha);
+}
+
+export async function planSeed(dir, destUrl, git) {
+  const packed = await objectBytes(dir, git);
+  if (packed < git.slice.thresholdBytes) return null;
+
+  const not = (await destinationTips(dir, destUrl, git)).map((sha) => `^${sha}`);
+  const total = await countRevs(dir, git, ['--branches']);
+  const missing = await countRevs(dir, git, ['--branches', ...not]);
+  if (!total || missing < 2) return null;
+
+  const bytes = Math.round(packed * (missing / total));
+  if (bytes < git.slice.thresholdBytes) return null;
+
+  const { stdout } = await runGit(
+    ['for-each-ref', '--sort=-committerdate', '--format=%(objectname) %(refname)', 'refs/heads'],
+    { cwd: dir, ...withTimeout(git, 60_000) },
+  );
+  const parsed = stdout
+    .split('\n')
+    .map((l) => l.trim().split(' '))
+    .filter(([sha, ref]) => sha && ref);
+
+  // HEAD first, so an empty destination gets its default branch rather than
+  // whichever branch happens to carry the history.
+  const { stdout: head } = await runGit(['symbolic-ref', '--quiet', 'HEAD'], {
+    cwd: dir,
+    ...withTimeout(git, 60_000),
+  }).catch(() => ({ stdout: '' }));
+  const isHead = ([, ref]) => ref === head.trim();
+  const heads = [...parsed.filter(isHead), ...parsed.filter((h) => !isHead(h))].slice(0, SLICE_HEADS);
+
+  let lead = null;
+  for (const [sha, ref] of heads) {
+    const ahead = await countRevs(dir, git, [sha, ...not]);
+    if (!lead || ahead > lead.ahead) lead = { sha, ref, ahead };
+    if (lead.ahead >= missing * 0.9) break;
+  }
+  if (!lead || lead.ahead < 2) return null;
+
+  const { stdout: list } = await runGit(['rev-list', '--reverse', lead.sha, ...not], {
+    cwd: dir,
+    ...withTimeout(git, 10 * 60_000),
+  });
+  const revs = list.split('\n').map((l) => l.trim()).filter(Boolean);
+  return revs.length < 2 ? null : { ref: lead.ref, revs, bytes };
+}
+
+export async function seedPush(dir, destUrl, git) {
+  const plan = await planSeed(dir, destUrl, git);
+  if (!plan) return null;
+
+  const { ref, revs } = plan;
+  git.log?.info('the destination is far behind, delivering the history in slices first', {
+    branch: ref,
+    commits: revs.length,
+    megabytes: Math.round(plan.bytes / 1024 / 1024),
+  });
+
+  const target = git.timeoutMs * SLICE_SHARE;
+  const started = Date.now();
+  let done = 0;
+  let size = Math.max(1, Math.ceil(revs.length / SLICE_FIRST));
+  let slices = 0;
+
+  while (done < revs.length) {
+    const take = Math.min(size, revs.length - done);
+    const at = Date.now();
+    try {
+      await runGit(['push', '--quiet', destUrl, `${revs[done + take - 1]}:${ref}`], { cwd: dir, ...git });
+    } catch (err) {
+      if (!err.timedOut) {
+        git.log?.warn('slicing stopped, the whole push is attempted instead', {
+          branch: ref,
+          delivered: done,
+          error: err.message,
+        });
+        break;
+      }
+      if (take === 1) {
+        err.message += `\none commit of ${ref} does not fit in git_timeout_minutes, so no slice can be small enough.`;
+        throw err;
+      }
+      size = Math.floor(take / 2);
+      git.log?.debug('a slice timed out, halving it', { branch: ref, commits: size });
+      continue;
+    }
+
+    done += take;
+    slices++;
+    const perMs = take / Math.max(Date.now() - at, 1);
+    size = Math.max(1, Math.min(Math.round(perMs * target), take * SLICE_GROWTH));
+  }
+
+  if (!slices) return null;
+  const summary = { branch: ref, slices, commits: done, seconds: Math.round((Date.now() - started) / 1000) };
+  git.log?.info('delivered the history in slices, the rest goes in one push', summary);
+  return summary;
+}
+
 export async function pushMirror(dir, destUrl, git, mode = 'refspecs') {
+  if (git.slice?.enabled) {
+    // An interrupted push leaves nothing behind, so a repository too big for one
+    // timeout never lands. Slices land one at a time and the next run resumes.
+    const seeded = await seedPush(dir, destUrl, git);
+    if (seeded) git.onSeed?.(seeded);
+  }
+
   const args =
     mode === 'mirror'
       ? ['push', '--mirror', '--quiet', destUrl]

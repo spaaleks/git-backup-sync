@@ -50,6 +50,12 @@ timezone: Europe/Berlin
 # Kill any git invocation that hangs longer than this.
 git_timeout_minutes: 30
 
+# A repository too large to push inside one timeout is delivered in slices, so
+# that every run gets further instead of starting over. Only pushes with at
+# least this much to transfer are sliced.
+slice_large_pushes: true
+slice_threshold_mb: 1024
+
 # Run records retained in the state database.
 keep_runs: 30
 

@@ -19,6 +19,7 @@ Any direction between them: GitHub to GitLab, GitLab to GitHub, either to a fold
 - **No token needed for public repositories.** A plain list of clone URLs works with no API access at all, inline or from a file you can regenerate.
 - **It refuses to destroy data.** Two repositories resolving to one destination aborts the whole run before anything is written, and it names both.
 - **It checks its own work.** After pushing it reads the destination back and compares every branch and tag.
+- **A repository too big for one push still arrives.** An oversized history is delivered in slices, and every slice that lands is progress the next run keeps. See [Large pushes](#large-pushes).
 - **Quiet by default.** Mail arrives when something changed or failed, plus a scheduled heartbeat whose absence is itself the alert.
 - **Nothing to install.** One container, one YAML file, secrets from the environment.
 
@@ -285,6 +286,8 @@ The whole document is validated at startup and **unknown keys are rejected**. A 
 | `log_level`               | `info`           | `error` \| `warn` \| `info` \| `debug`                                                        |
 | `timezone`                | `TZ`, then `UTC` | IANA zone the cron is evaluated in. Set it here or as `TZ`, not both.                         |
 | `git_timeout_minutes`     | `30`             | Any git invocation is killed after this. Large GitLab to GitLab migrations need more.         |
+| `slice_large_pushes`      | `true`           | Deliver a push too large for one timeout in slices. See [Large pushes](#large-pushes).        |
+| `slice_threshold_mb`      | `1024`           | Only pushes with at least this much to transfer are sliced.                                   |
 | `keep_runs`               | `30`             | Run records retained in the state database.                                                   |
 | `prune_mirrors`           | `true`           | Remove mirror directories nothing references. See [Pruning](#pruning).                        |
 | `schedule.sync`           | `0 3 * * *`      | 5-field cron.                                                                                 |
@@ -294,18 +297,18 @@ The whole document is validated at startup and **unknown keys are rejected**. A 
 
 Where state lives. SQLite by default, Postgres when you want more than one process. Every field also reads from an environment variable, so an Ansible-managed deployment can set them without templating the YAML. A value in the file wins over the environment.
 
-| Key                | Environment    | Default              | Notes                                          |
-| ------------------ | -------------- | -------------------- | ---------------------------------------------- |
-| `database.driver`  | `DB_DRIVER`    | `sqlite`             | `sqlite` \| `postgres`                          |
-| `database.path`    | `DB_PATH`      | `${data_dir}/state.db` | sqlite only. Created with mode `0600`.       |
-| `database.host`    | `DB_HOST`      |                      | postgres only, required                        |
-| `database.port`    | `DB_PORT`      | `5432`               | postgres only                                  |
-| `database.name`    | `DB_NAME`      |                      | postgres only, required                        |
-| `database.user`    | `DB_USER`      |                      | postgres only, required                        |
-| `database.password`| `DB_PASSWORD`  |                      | postgres only                                  |
-| `database.ssl`     | `DB_SSL`       | `require`            | `disable` \| `require` \| `verify-full`         |
-| `database.ssl_ca`  | `DB_SSL_CA`    |                      | postgres only, path to a CA bundle             |
-| `database.pool_max`| `DB_POOL_MAX`  | `10`                 | postgres only                                  |
+| Key                 | Environment   | Default                | Notes                                   |
+| ------------------- | ------------- | ---------------------- | --------------------------------------- |
+| `database.driver`   | `DB_DRIVER`   | `sqlite`               | `sqlite` \| `postgres`                  |
+| `database.path`     | `DB_PATH`     | `${data_dir}/state.db` | sqlite only. Created with mode `0600`.  |
+| `database.host`     | `DB_HOST`     |                        | postgres only, required                 |
+| `database.port`     | `DB_PORT`     | `5432`                 | postgres only                           |
+| `database.name`     | `DB_NAME`     |                        | postgres only, required                 |
+| `database.user`     | `DB_USER`     |                        | postgres only, required                 |
+| `database.password` | `DB_PASSWORD` |                        | postgres only                           |
+| `database.ssl`      | `DB_SSL`      | `require`              | `disable` \| `require` \| `verify-full` |
+| `database.ssl_ca`   | `DB_SSL_CA`   |                        | postgres only, path to a CA bundle      |
+| `database.pool_max` | `DB_POOL_MAX` | `10`                   | postgres only                           |
 
 Discrete fields rather than a connection URL, so a password containing `@`, `/` or `#` needs no percent-encoding, and so TLS verification is two obvious fields instead of a query string.
 
@@ -1076,6 +1079,20 @@ A repository that vanishes from one source and appears in another, sharing at le
 - Every git invocation is timed out (`git_timeout_minutes`) so a hung transfer cannot wedge the scheduler.
 - Rate limiting is tracked per connection, not globally. GitHub's `X-RateLimit-*` and GitLab's `RateLimit-*` headers are read and respected. Different tokens have independent budgets.
 - Never two syncs at once. Under SQLite that is a lockfile in `data_dir`: the holder touches it every 30 seconds and a lock untouched for five minutes is treated as stale, which matters in Docker, where every run has a new hostname, so a PID check cannot see across containers and a killed container would otherwise hold the lock until it aged out. Under Postgres it is an advisory lock, which the server releases when the connection drops, so there is no stale lock to reason about.
+
+### Large pushes
+
+A repository whose first push does not fit in `git_timeout_minutes` never arrives on its own. Git discards an interrupted push, so every run repeats the same doomed transfer and nothing accumulates.
+
+When more than `slice_threshold_mb` has to travel, the history is delivered in slices first. The branch that is furthest ahead of the destination is walked oldest commit first and pushed in pieces, each piece its own push with its own timeout. A slice that lands stays on the destination, so the next slice, or the next night's run, carries on from where it stopped. The full mirror push follows and has only the remainder and the other branches left to send, which is small because they share the history that already arrived.
+
+The run mail names it:
+
+```
+    too large for one push: 6042 commits of refs/heads/master were delivered in 7 slices over 4102s
+```
+
+Set `slice_large_pushes: false` to always push in one go.
 
 ### Pacing
 
