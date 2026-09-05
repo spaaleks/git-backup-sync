@@ -1,8 +1,8 @@
 import { gitlab } from '../providers/index.js';
-import { runGit } from '../mirror.js';
+import { runGit, withTimeout } from '../mirror.js';
 import { stateToRefs } from '../diff.js';
 
-export async function handleRemap({ mapping, previous, destConn, destEnv, timeoutMs, dryRun, rlog }) {
+export async function handleRemap({ mapping, previous, destConn, destGit, dryRun, rlog }) {
   const info = { from: previous.destination, to: `${mapping.connection}:${mapping.path}`, action: 'reported' };
   const mode = mapping.onRemap ?? 'report';
   if (mode === 'report') return info;
@@ -42,7 +42,7 @@ export async function handleRemap({ mapping, previous, destConn, destEnv, timeou
     return info;
   }
 
-  const drift = await refsDiffer(destConn, oldPath, previous.refs, destEnv, timeoutMs);
+  const drift = await refsDiffer(destConn, oldPath, previous.refs, destGit);
   if (drift === null) {
     info.detail = 'left in place: could not read the refs at the old path to confirm nobody pushed there';
     return info;
@@ -63,9 +63,9 @@ function splitDestination(value) {
   return idx < 0 ? [null, String(value)] : [value.slice(0, idx), value.slice(idx + 1)];
 }
 
-async function refsDiffer(destConn, oldPath, knownRefs, env, timeoutMs) {
+async function refsDiffer(destConn, oldPath, knownRefs, git) {
   try {
-    const { stdout } = await runGit(['ls-remote', destConn.sshUrl(oldPath)], { env, timeoutMs: Math.min(timeoutMs, 120_000) });
+    const { stdout } = await runGit(['ls-remote', destConn.sshUrl(oldPath)], withTimeout(git, 120_000));
     const remote = new Map();
     for (const line of stdout.split('\n')) {
       const [sha, ref] = line.trim().split(/\s+/);

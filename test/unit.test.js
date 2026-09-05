@@ -10,7 +10,8 @@ import { loadConfig } from '../src/config/load.js';
 import { resolveMapping, findCollisions, slugifySegment, validatePath } from '../src/mapping.js';
 import { parseCron, nextRun } from '../src/cron.js';
 import { diffRefs, describeChanges, detectMoves } from '../src/diff.js';
-import { migrate, STATE_VERSION } from '../src/state.js';
+import { memoryState } from '../src/state.js';
+import { Job } from '../src/job.js';
 
 test('interpolation: required, fallback, escape', () => {
   const env = { SET: 'value', EMPTY: '' };
@@ -190,8 +191,6 @@ test('mapping: a destination equal to its own source on the same host is a self-
 
 test('pool: no pause keeps a continuous worker pool', async () => {
   const { pool } = await import('../src/sync/pool.js');
-  const { resetStop } = await import('../src/sync/stop.js');
-  resetStop();
 
   let inFlight = 0;
   let peak = 0;
@@ -202,7 +201,7 @@ test('pool: no pause keeps a continuous worker pool', async () => {
     await new Promise((r) => setTimeout(r, i === 0 ? 60 : 5));
     inFlight--;
     return i;
-  });
+  }, { job: new Job() });
 
   assert.equal(out.length, 9);
   assert.equal(peak, 3, 'never exceeds the concurrency limit');
@@ -210,8 +209,6 @@ test('pool: no pause keeps a continuous worker pool', async () => {
 
 test('pool: a pause runs fixed batches and waits between them', async () => {
   const { pool } = await import('../src/sync/pool.js');
-  const { resetStop } = await import('../src/sync/stop.js');
-  resetStop();
 
   const starts = [];
   const t0 = Date.now();
@@ -219,7 +216,7 @@ test('pool: a pause runs fixed batches and waits between them', async () => {
   const out = await pool(items, 2, async (i) => {
     starts.push(Date.now() - t0);
     return i;
-  }, { pauseMs: 120 });
+  }, { job: new Job(), pauseMs: 120 });
 
   assert.deepEqual(out, [0, 1, 2, 3]);
   assert.ok(starts[1] < 60, 'the first two run together');
@@ -236,7 +233,8 @@ test('pool: a pause survives an otherwise empty event loop', async () => {
 
   const script = `
     import { pool } from '${process.cwd()}/src/sync/pool.js';
-    const out = await pool([1, 2, 3, 4], 2, async (i) => i, { pauseMs: 400 });
+    import { Job } from '${process.cwd()}/src/job.js';
+    const out = await pool([1, 2, 3, 4], 2, async (i) => i, { job: new Job(), pauseMs: 400 });
     console.log(JSON.stringify(out));
   `;
 
@@ -246,8 +244,6 @@ test('pool: a pause survives an otherwise empty event loop', async () => {
 
 test('pool: a batch that changed nothing is not waited out', async () => {
   const { pool } = await import('../src/sync/pool.js');
-  const { resetStop } = await import('../src/sync/stop.js');
-  resetStop();
 
   const items = [
     { status: 'unchanged' },
@@ -265,6 +261,7 @@ test('pool: a batch that changed nothing is not waited out', async () => {
     starts.push(Date.now() - t0);
     return item;
   }, {
+    job: new Job(),
     pauseMs: 300,
     pauseWhen: (batch) => batch.some((r) => r.status === 'new' || r.status === 'changed'),
     onPause: (batch) => paused.push(batch.map((r) => r.status).join('+')),
@@ -322,15 +319,113 @@ test('diff: same-named repositories with no shared commit are not a move', () =>
   assert.equal(detectMoves(vanished, fresh).moves.length, 0);
 });
 
-test('state: a pre-v3 document keeps its repositories', () => {
-  const out = migrate({ version: 2, repos: { 'a/b': { refs: { 'refs/heads/main': 'x' }, lastSuccess: '2026-01-01T00:00:00Z' } } });
-  assert.equal(out.version, STATE_VERSION);
-  assert.equal(out.sources.legacy.repos['a/b'].refs['refs/heads/main'], 'x');
+test('state: a repository record survives a reload of the store', async () => {
+  const state = await memoryState();
+  const source = await state.source('github');
+  await source.setConnection('gh');
+  await source.putRepo('a/b', {
+    destination: 'gl:mirror/b',
+    refs: { 'refs/heads/main': 'x' },
+    wiki: { refs: { 'refs/heads/master': 'w' }, lastSuccess: '2026-01-01T00:00:00Z' },
+    lastSuccess: '2026-01-01T00:00:00Z',
+    lastSeenAt: '2026-01-01T00:00:00Z',
+    consecutiveFailures: 0,
+    lastError: null,
+    sizeBytes: 4096,
+    usesLfs: true,
+    createdByService: true,
+  });
+
+  await state.reload();
+  const record = state.sources.github.repos['a/b'];
+  assert.equal(state.sources.github.connection, 'gh');
+  assert.equal(record.refs['refs/heads/main'], 'x');
+  assert.equal(record.wiki.refs['refs/heads/master'], 'w');
+  assert.equal(record.sizeBytes, 4096);
+  assert.equal(record.usesLfs, true);
+  assert.equal(record.createdByService, true);
+  await state.close();
 });
 
-test('state: garbage in, empty state out, no throw', () => {
-  assert.equal(migrate(null).version, STATE_VERSION);
-  assert.deepEqual(migrate({ version: 3, sources: { s: { repos: { x: 'not an object' } } } }).sources.s.repos, {});
+test('state: forgetting a source takes its repositories with it', async () => {
+  const state = await memoryState();
+  const source = await state.source('retired');
+  await source.putRepo('old/thing', { destination: 'gl:mirror/thing', refs: {} });
+
+  await state.forgetSource('retired');
+  await state.reload();
+
+  assert.equal(state.sources.retired, undefined);
+  assert.equal((await state.dump()).repo.length, 0, 'the rows cascade');
+  await state.close();
+});
+
+test('state: runs are trimmed to the retention limit, newest kept', async () => {
+  const state = await memoryState();
+  for (let i = 0; i < 5; i++) {
+    await state.addRun({ startedAt: `2026-01-0${i + 1}T00:00:00Z`, durationMs: i, reason: 'test' }, { keep: 3 });
+  }
+  await state.reload();
+
+  assert.equal(state.runs.length, 3);
+  assert.equal(state.runs[0].startedAt, '2026-01-03T00:00:00Z');
+  assert.equal(state.runs.at(-1).startedAt, '2026-01-05T00:00:00Z');
+  await state.close();
+});
+
+test('job: stopping is per job, not per process', () => {
+  const one = new Job({ reason: 'a' });
+  const two = new Job({ reason: 'b' });
+  one.stop();
+  assert.equal(one.stopping, true);
+  assert.equal(two.stopping, false, 'cancelling one job leaves the other running');
+});
+
+test('loadConfig: the database defaults to sqlite beside the data directory', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gbs-'));
+  try {
+    const file = path.join(dir, 'config.yml');
+    await writeFile(file, YAML_DOC);
+    const config = await loadConfig({ path: file, env: FULL_ENV });
+    assert.equal(config.database.driver, 'sqlite');
+    assert.equal(config.database.path, '/tmp/gbs/state.db');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig: DB_* fills the database block and the file wins over it', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gbs-'));
+  try {
+    const file = path.join(dir, 'config.yml');
+    await writeFile(file, YAML_DOC);
+    const fromEnv = await loadConfig({ path: file, env: { ...FULL_ENV, DB_PATH: '/srv/state.db' } });
+    assert.equal(fromEnv.database.path, '/srv/state.db');
+
+    await writeFile(file, `database:\n  path: /from/file.db\n${YAML_DOC}`);
+    const fromFile = await loadConfig({ path: file, env: { ...FULL_ENV, DB_PATH: '/srv/state.db' } });
+    assert.equal(fromFile.database.path, '/from/file.db');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig: a postgres field on a sqlite database is named, not ignored', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gbs-'));
+  try {
+    const file = path.join(dir, 'config.yml');
+    await writeFile(file, YAML_DOC);
+    await assert.rejects(
+      loadConfig({ path: file, env: { ...FULL_ENV, DB_HOST: 'db.example.com' } }),
+      (err) => /database\.host/.test(err.message) && /postgres/.test(err.message),
+    );
+    await assert.rejects(
+      loadConfig({ path: file, env: { ...FULL_ENV, DB_DRIVER: 'postgres' } }),
+      (err) => /database\.host/.test(err.message) && /DB_HOST/.test(err.message),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('loadConfig: an unset token exits with the offending key named', async () => {

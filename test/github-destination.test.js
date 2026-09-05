@@ -11,8 +11,8 @@ import { startFakeApi, glProject } from './fake-api.js';
 import { validate, configSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/load.js';
 import { Connection, buildConnections } from '../src/connections.js';
-import { runSync, resetStop } from '../src/run.js';
-import { emptyState } from '../src/state.js';
+import { runSync } from '../src/run.js';
+import { memoryState } from '../src/state.js';
 import { resolveMapping } from '../src/mapping.js';
 import { setLevel } from '../src/logger.js';
 
@@ -198,9 +198,7 @@ test('a GitLab source mirrors into a GitHub organisation', async (t) => {
     verify: config.defaults.verify,
   });
   config.sources[0].batch_pause_seconds = 0;
-
-  resetStop();
-  const report = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const report = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
 
   assert.equal(report.totals.failed, 0, JSON.stringify(report.sources[0].repos, null, 2));
   assert.equal(report.totals.new, 1);
@@ -218,7 +216,7 @@ test('a GitLab source mirrors into a GitHub organisation', async (t) => {
   assert.match(stdout, /refs\/tags\/v1/);
 
   const before = api.state.updated.length;
-  const second = await runSync({ config, connections: buildConnections(config), state: emptyState(), reason: 'test' });
+  const second = await runSync({ config, connections: buildConnections(config), state: await memoryState(), reason: 'test' });
   assert.equal(second.totals.failed, 0);
   assert.equal(api.state.updated.length, before, 'metadata already matches');
 });

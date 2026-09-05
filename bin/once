@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run one sync now and exit. Safe to run while the scheduler is up: the
 # lockfile in data_dir stops two syncs overlapping, and the scheduler re-reads
-# state.json before its next run.
+# the state store before its next run.
 #
 #   bin/once                      sync every enabled source
 #   bin/once <source>             sync only that source

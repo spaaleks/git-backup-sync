@@ -82,8 +82,8 @@ export class Notifier {
     if (this.transport) {
       const message = this.withLogo(await buildHeartbeatMail({ config: this.config, state, connections, uptimeMs }));
       jobs.push(
-        sendMail(this.transport, this.config.smtp, message).then((ok) => {
-          if (ok) state.lastHeartbeatAt = new Date().toISOString();
+        sendMail(this.transport, this.config.smtp, message).then(async (ok) => {
+          if (ok) await state.heartbeatSent();
           return ok;
         }),
       );

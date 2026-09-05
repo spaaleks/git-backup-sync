@@ -123,13 +123,15 @@ export function buildRunMail(report, config) {
     const bits = [];
     if (source.disabled) bits.push('disabled');
     if (source.error) bits.push('FAILED');
-    for (const key of ['new', 'changed', 'moved', 'unchanged', 'failed', 'interrupted', 'vanished', 'excluded', 'remapped', 'planned']) {
+    for (const key of ['new', 'changed', 'moved', 'unchanged', 'failed', 'interrupted', 'vanished', 'remapped', 'planned']) {
       if (c[key]) bits.push(`${c[key]} ${key}`);
     }
-    if (source.filtered) bits.push(`${source.filtered} filtered out`);
-    if (source.unreadable?.length) bits.push(`${source.unreadable.length} UNREADABLE`);
     if (source.skipped) bits.push(`${source.skipped} skipped by rules`);
     lines.push(`  ${pad(source.name, 24)} ${bits.join(', ') || 'nothing to do'}`);
+    const filtered = filteredNote(source, { shout: true });
+    if (filtered) {
+      lines.push(`${' '.repeat(27)}${filtered.count} filtered out of the source ${filtered.tail}`);
+    }
   }
   lines.push('');
 
@@ -172,6 +174,24 @@ export function buildRunMail(report, config) {
 
   const text = lines.join('\n');
   return { subject, text, html: renderRunHtml(report, config) };
+}
+
+function filteredNote(source, { shout = false } = {}) {
+  const count = source.filtered ?? 0;
+  if (!count) return null;
+
+  const unreadable = source.unreadable?.length ?? 0;
+  const byRule = count - unreadable;
+  const word = shout ? 'UNREADABLE' : 'unreadable';
+
+  let why;
+  if (unreadable && byRule) why = `${unreadable} ${word}, ${byRule} by rule`;
+  else if (unreadable) why = count === 1 ? word : `all ${word}`;
+  else why = 'by rule';
+
+  const excluded = source.counts?.excluded ?? 0;
+  const note = excluded ? `${excluded === count ? 'all' : excluded} of them no longer mirrored` : '';
+  return { count, tail: `(${why})${note ? `, ${note}` : ''}` };
 }
 
 function remapAction(remap) {
@@ -292,16 +312,19 @@ export function renderRunHtml(report, config) {
     const bits = [];
     if (s.disabled) bits.push('disabled');
     if (s.error) bits.push('FAILED');
-    for (const key of ['new', 'changed', 'moved', 'unchanged', 'failed', 'vanished', 'excluded', 'remapped', 'planned']) {
+    for (const key of ['new', 'changed', 'moved', 'unchanged', 'failed', 'vanished', 'remapped', 'planned']) {
       if (c[key]) bits.push(`${c[key]} ${key}`);
     }
-    if (s.filtered) bits.push(`${s.filtered} filtered out`);
-    if (s.unreadable?.length) bits.push(`${s.unreadable.length} unreadable`);
-    return [code(s.name), escapeHtml(bits.join(', ') || 'nothing to do')];
+    const filtered = filteredNote(s);
+    return [
+      code(s.name),
+      escapeHtml(bits.join(', ') || 'nothing to do'),
+      filtered ? escapeHtml(`${filtered.count} ${filtered.tail}`) : '&mdash;',
+    ];
   });
   if (perSource.length) {
     out.push(h2('Per source'));
-    out.push(table(['Source', 'Outcome'], perSource));
+    out.push(table(['Source', 'Synced', 'Filtered out'], perSource));
   }
 
   if (report.createdGroups.length) {

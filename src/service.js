@@ -1,11 +1,11 @@
-import { writeFile, mkdir, stat } from 'node:fs/promises';
+import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { log, setLevel, registerSecret } from './logger.js';
 import { loadConfig, redactedConfig } from './config/load.js';
 import { buildConnections } from './connections.js';
-import { loadState, saveState, statePath } from './state.js';
-import { runSync, requestStop } from './run.js';
-import { killAllGit, runningGitCount } from './mirror.js';
+import { openState } from './state.js';
+import { Job } from './job.js';
+import { runSync } from './run.js';
 import { Notifier } from './notify/index.js';
 import { startMetricsServer } from './metrics.js';
 import { parseCron, nextRun, approximateIntervalMs as approximateInterval } from './cron.js';
@@ -14,6 +14,7 @@ export class Service {
   constructor(config) {
     this.applyConfig(config);
     this.state = null;
+    this.job = null;
     this.running = null;
     this.lastReport = null;
     this.metricsServer = null;
@@ -40,7 +41,8 @@ export class Service {
     log.info('resolved configuration', { config: redactedConfig(this.config) });
 
     await mkdir(this.config.data_dir, { recursive: true });
-    this.state = await loadState(this.config.data_dir);
+    this.state ??= await openState(this.config.database);
+    log.info('state store opened', { store: this.state.store.describe });
 
     this.startMetrics();
     this.keepAlive();
@@ -123,19 +125,19 @@ export class Service {
       log.warn('a sync is already running, not starting another', { reason });
       return this.running;
     }
+    this.job = new Job({ reason, secrets: Object.values(this.connections).map((c) => c.token) });
     this.running = (async () => {
-      await this.#reloadStateIfChanged();
+      await this.state.reload();
       const report = await runSync({
         config: this.config,
         connections: this.connections,
         state: this.state,
         reason,
         only,
+        job: this.job,
       });
       if (!report.skipped) {
         this.lastReport = report;
-        await saveState(this.config.data_dir, this.state, { keepRuns: this.config.keep_runs });
-        this.stateMtimeMs = await stateMtimeMs(this.config.data_dir);
         await this.notifier.runFinished(report);
       }
       await this.writeHealth(report);
@@ -146,31 +148,28 @@ export class Service {
       return await this.running;
     } finally {
       this.running = null;
+      this.job = null;
+      if (this.timers.sync) {
+        log.info('idle', { lastRunFinishedAt: this.lastRunFinishedAt ?? null, nextRunAt: this.nextSyncAt()?.toISOString() ?? null });
+      }
     }
   }
 
-  async #reloadStateIfChanged() {
-    const current = await stateMtimeMs(this.config.data_dir);
-    if (current === null || this.stateMtimeMs === current) return;
-    if (this.stateMtimeMs !== undefined) {
-      log.info('state file changed on disk since our last write, reloading it');
-    }
-    this.state = await loadState(this.config.data_dir);
-    this.stateMtimeMs = current;
+  nextSyncAt() {
+    const spec = safeCron(this.config.schedule.sync);
+    return spec ? nextRun(spec, new Date(), this.config.timezone) : null;
   }
 
   async heartbeat() {
-    const ok = await this.notifier.heartbeat({
+    await this.notifier.heartbeat({
       state: this.state,
       connections: this.connections,
       uptimeMs: Date.now() - this.startedAt,
     });
-    if (ok) await saveState(this.config.data_dir, this.state, { keepRuns: this.config.keep_runs });
   }
 
   async writeHealth(report) {
-    const spec = safeCron(this.config.schedule.sync);
-    const next = spec ? nextRun(spec, new Date(), this.config.timezone) : null;
+    const next = this.nextSyncAt();
     const health = {
       pid: process.pid,
       startedAt: new Date(this.startedAt).toISOString(),
@@ -194,6 +193,7 @@ export class Service {
     try {
       const config = await loadConfig({ path: this.config.configPath });
       for (const conn of Object.values(config.connections)) registerSecret(conn.token);
+      if (config.database?.password) registerSecret(config.database.password);
       this.applyConfig(config);
       this.schedule();
       this.startMetrics();
@@ -208,26 +208,22 @@ export class Service {
     // Ctrl-C cannot kill a transfer half way, which is right for the data and
     // would otherwise leave no way to stop a long clone.
     if (this.shuttingDown) {
-      const killed = killAllGit();
+      const killed = this.job?.killGit() ?? 0;
       log.warn('second signal, aborting now', { signal, gitProcessesKilled: killed });
       await exitCleanly(130);
     }
     this.shuttingDown = true;
     log.info('shutting down', { signal });
-    requestStop();
+    this.job?.stop(signal);
     for (const timer of Object.values(this.timers)) if (timer) clearTimeout(timer);
 
     if (this.running) {
       log.info('finishing the repositories already in flight, send the signal again to abort now', {
-        gitProcesses: runningGitCount(),
+        gitProcesses: this.job?.runningGit ?? 0,
       });
       await this.running.catch(() => {});
     }
-    if (this.state) {
-      await saveState(this.config.data_dir, this.state, { keepRuns: this.config.keep_runs }).catch((err) =>
-        log.error('could not write state during shutdown', { error: err.message }),
-      );
-    }
+    await this.state?.close().catch((err) => log.error('could not close the state store', { error: err.message }));
     if (this.metricsServer) this.metricsServer.close();
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
     log.info('stopped');
@@ -235,20 +231,16 @@ export class Service {
   }
 }
 
+// stdout is a pipe under `docker compose run`, so writes are async and a bare
+// process.exit() drops whatever has not drained, final log line included.
 export async function exitCleanly(code) {
-  await new Promise((resolve) => {
-    if (process.stdout.write('')) resolve();
-    else process.stdout.once('drain', resolve);
-  });
-  process.exit(code);
-}
-
-async function stateMtimeMs(dataDir) {
-  try {
-    return (await stat(statePath(dataDir))).mtimeMs;
-  } catch {
-    return null;
+  for (const stream of [process.stdout, process.stderr]) {
+    await new Promise((resolve) => {
+      if (stream.write('')) resolve();
+      else stream.once('drain', resolve);
+    });
   }
+  process.exit(code);
 }
 
 function safeCron(expr) {

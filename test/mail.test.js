@@ -5,6 +5,7 @@ import { buildRunMail } from '../src/mail/run-mail.js';
 import { buildHeartbeatMail } from '../src/mail/heartbeat.js';
 import { escapeHtml, badge, table, bar, statusBadge, shortStatus } from '../src/mail/theme.js';
 import { formatDuration, formatBytes } from '../src/mail/format.js';
+import { fromField } from '../src/mail/transport.js';
 
 const CONFIG = {
   smtp: { subject_prefix: '[repo-sync]' },
@@ -118,6 +119,24 @@ test('the html and the text agree on every count', () => {
   }
 });
 
+test('a filtered repository is counted once, not once per reason', () => {
+  const nested = report({
+    counts: { unchanged: 33, excluded: 2 },
+    unreadable: [{ repo: 'acme/legacy', reason: 'no code' }, { repo: 'acme/archive', reason: 'no access' }],
+    repos: [
+      { repo: 'acme/legacy', status: 'excluded', reason: 'no code' },
+      { repo: 'acme/archive', status: 'excluded', reason: 'no access' },
+    ],
+  });
+  nested.sources[0].filtered = 2;
+  const mail = buildRunMail(nested, CONFIG);
+
+  assert.match(mail.text, /2 filtered out of the source \(all UNREADABLE\), all of them no longer mirrored/);
+  assert.match(mail.html, /2 \(all unreadable\), all of them no longer mirrored/);
+  assert.doesNotMatch(mail.text, /2 excluded/);
+  assert.doesNotMatch(mail.html, /2 excluded/);
+});
+
 test('the subject says what happened before the mail is opened', () => {
   assert.match(buildRunMail(busy(), CONFIG).subject, /^\[repo-sync\] 2 repos updated, 1 no longer mirrored, 1 failed$/);
   assert.match(buildRunMail(report({ counts: { unchanged: 5 } }), CONFIG).subject, /nothing changed$/);
@@ -215,4 +234,18 @@ test('the heartbeat probes each connection once, not once per rendering', async 
   };
   await buildHeartbeatMail({ config: CONFIG, state: { sources: {}, runs: [] }, connections, uptimeMs: 1000 });
   assert.equal(probes, 1);
+});
+
+test('fromField carries the display name', () => {
+  assert.deepEqual(fromField({ from: 'a@example.com', from_name: 'git-backup-sync' }), {
+    name: 'git-backup-sync',
+    address: 'a@example.com',
+  });
+  assert.equal(fromField({ from: 'a@example.com' }), 'a@example.com');
+  assert.equal(fromField({ from: 'a@example.com', from_name: '  ' }), 'a@example.com');
+  assert.deepEqual(fromField({ from: '"Old Name" <a@example.com>' }), { name: 'Old Name', address: 'a@example.com' });
+  assert.deepEqual(fromField({ from: 'Old Name <a@example.com>', from_name: 'New' }), {
+    name: 'New',
+    address: 'a@example.com',
+  });
 });

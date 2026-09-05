@@ -2,9 +2,9 @@ import { gitlab } from '../providers/index.js';
 import { pushMirror } from '../mirror.js';
 import { firstLine } from '../mail/format.js';
 
-export async function pushWithRelax({ dir, destUrl, destEnv, timeoutMs, mapping, project, destConn, result, rlog }) {
+export async function pushWithRelax({ dir, destUrl, destGit, mapping, project, destConn, result, rlog }) {
   try {
-    await pushMirror(dir, destUrl, destEnv, timeoutMs, mapping.pushMode);
+    await pushMirror(dir, destUrl, destGit, mapping.pushMode);
     return;
   } catch (err) {
     const stderr = String(err.stderr || '');
@@ -40,7 +40,7 @@ export async function pushWithRelax({ dir, destUrl, destEnv, timeoutMs, mapping,
     }
 
     try {
-      await pushMirror(dir, destUrl, destEnv, timeoutMs, mapping.pushMode);
+      await pushMirror(dir, destUrl, destGit, mapping.pushMode);
       result.relaxedPushRules.retrySucceeded = true;
       rlog.info('push succeeded after relaxing the destination push rules', { project: mapping.path });
     } catch (retryErr) {

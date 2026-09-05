@@ -18,7 +18,7 @@ export function emptyCounts() {
   return { new: 0, changed: 0, unchanged: 0, failed: 0, interrupted: 0, vanished: 0, excluded: 0, moved: 0, remapped: 0, planned: 0 };
 }
 
-export function classifyMoves(report, state) {
+export async function classifyMoves(report, state) {
   const vanished = [];
   const fresh = [];
 
@@ -56,7 +56,7 @@ export function classifyMoves(report, state) {
 
   for (const move of moves) {
     const st = state.sources[move.from.sourceReport.name];
-    if (st?.repos) delete st.repos[move.from.repo];
+    if (st) await st.deleteRepo(move.from.repo);
   }
 }
 

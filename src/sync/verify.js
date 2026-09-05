@@ -1,4 +1,4 @@
-import { remoteRefs } from '../mirror.js';
+import { remoteRefs, withTimeout } from '../mirror.js';
 
 export class VerificationError extends Error {
   constructor(message) {
@@ -7,11 +7,11 @@ export class VerificationError extends Error {
   }
 }
 
-export async function verifyDestination({ destUrl, destEnv, timeoutMs, expected }) {
+export async function verifyDestination({ destUrl, destGit, expected }) {
   const wanted = new Map(
     [...expected].filter(([ref]) => ref.startsWith('refs/heads/') || ref.startsWith('refs/tags/')),
   );
-  const actual = await remoteRefs(destUrl, destEnv, Math.min(timeoutMs, 120_000));
+  const actual = await remoteRefs(destUrl, withTimeout(destGit, 120_000));
 
   const missing = [];
   const wrong = [];

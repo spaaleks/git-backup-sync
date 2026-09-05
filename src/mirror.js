@@ -27,28 +27,46 @@ export function gitEnv(connection) {
   };
 }
 
-const running = new Set();
+export class GitRegistry {
+  #running = new Set();
 
-export function runningGitCount() {
-  return running.size;
-}
+  get size() {
+    return this.#running.size;
+  }
 
-export function killAllGit(signal = 'SIGKILL') {
-  const count = running.size;
-  for (const proc of running) {
-    try {
-      process.kill(-proc.pid, signal);
-    } catch {
+  add(proc) {
+    this.#running.add(proc);
+  }
+
+  delete(proc) {
+    this.#running.delete(proc);
+  }
+
+  killAll(signal = 'SIGKILL') {
+    const count = this.#running.size;
+    for (const proc of this.#running) {
       try {
-        proc.kill(signal);
+        process.kill(-proc.pid, signal);
       } catch {
+        try {
+          proc.kill(signal);
+        } catch {
+        }
       }
     }
+    return count;
   }
-  return count;
 }
 
-export function runGit(args, { cwd, env = {}, timeoutMs = 30 * 60_000, input } = {}) {
+export function gitContext(connection, { timeoutMs, job }) {
+  return { env: gitEnv(connection), timeoutMs, registry: job?.git ?? null };
+}
+
+export function withTimeout(git, ms) {
+  return { ...git, timeoutMs: Math.min(git.timeoutMs, ms) };
+}
+
+export function runGit(args, { cwd, env = {}, timeoutMs = 30 * 60_000, input, registry = null } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, {
       cwd,
@@ -58,7 +76,7 @@ export function runGit(args, { cwd, env = {}, timeoutMs = 30 * 60_000, input } =
       detached: true,
     });
 
-    running.add(proc);
+    registry?.add(proc);
 
     let stdout = '';
     let stderr = '';
@@ -81,12 +99,12 @@ export function runGit(args, { cwd, env = {}, timeoutMs = 30 * 60_000, input } =
       stderr += d;
     });
     proc.on('error', (err) => {
-      running.delete(proc);
+      registry?.delete(proc);
       clearTimeout(timer);
       reject(new GitError(`failed to run git: ${err.message}`, { args }));
     });
     proc.on('close', (code, signal) => {
-      running.delete(proc);
+      registry?.delete(proc);
       clearTimeout(timer);
       if (timedOut) {
         const limit = timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} minutes` : `${Math.round(timeoutMs / 1000)}s`;
@@ -135,13 +153,9 @@ export function parseRefs(stdout) {
   return refs;
 }
 
-export async function snapshotRefs(dir, env, timeoutMs) {
+export async function snapshotRefs(dir, git) {
   if (!(await isMirror(dir))) return new Map();
-  const { stdout } = await runGit(['for-each-ref', '--format=%(refname) %(objectname)'], {
-    cwd: dir,
-    env,
-    timeoutMs,
-  });
+  const { stdout } = await runGit(['for-each-ref', '--format=%(refname) %(objectname)'], { cwd: dir, ...git });
   return parseRefs(stdout);
 }
 
@@ -151,23 +165,23 @@ export function isInternalRef(ref) {
   return INTERNAL_REF_PREFIXES.some((p) => ref.startsWith(p));
 }
 
-export async function pruneInternalRefs(dir, env, timeoutMs) {
-  const { stdout } = await runGit(['for-each-ref', '--format=%(refname)'], { cwd: dir, env, timeoutMs });
+export async function pruneInternalRefs(dir, git) {
+  const { stdout } = await runGit(['for-each-ref', '--format=%(refname)'], { cwd: dir, ...git });
   const doomed = stdout.split('\n').map((l) => l.trim()).filter((l) => l && isInternalRef(l));
   if (doomed.length === 0) return 0;
   const input = doomed.map((ref) => `delete ${ref}\n`).join('');
-  await runGit(['update-ref', '--stdin'], { cwd: dir, env, timeoutMs, input });
+  await runGit(['update-ref', '--stdin'], { cwd: dir, ...git, input });
   return doomed.length;
 }
 
-export async function fetchMirror(dir, sshUrl, env, timeoutMs) {
+export async function fetchMirror(dir, sshUrl, git) {
   const exists = await isMirror(dir);
   if (!exists) {
     await mkdir(path.dirname(dir), { recursive: true });
     const tmp = `${dir}.tmp-${process.pid}`;
     await rm(tmp, { recursive: true, force: true });
     try {
-      await runGit(['clone', '--mirror', '--quiet', sshUrl, tmp], { env, timeoutMs });
+      await runGit(['clone', '--mirror', '--quiet', sshUrl, tmp], { ...git });
       const { rename } = await import('node:fs/promises');
       await rename(tmp, dir);
     } finally {
@@ -176,12 +190,12 @@ export async function fetchMirror(dir, sshUrl, env, timeoutMs) {
     return { cloned: true };
   }
 
-  await runGit(['remote', 'set-url', 'origin', sshUrl], { cwd: dir, env, timeoutMs });
-  await runGit(['remote', 'update', '--prune'], { cwd: dir, env, timeoutMs });
+  await runGit(['remote', 'set-url', 'origin', sshUrl], { cwd: dir, ...git });
+  await runGit(['remote', 'update', '--prune'], { cwd: dir, ...git });
   return { cloned: false };
 }
 
-export async function pushMirror(dir, destUrl, env, timeoutMs, mode = 'refspecs') {
+export async function pushMirror(dir, destUrl, git, mode = 'refspecs') {
   const args =
     mode === 'mirror'
       ? ['push', '--mirror', '--quiet', destUrl]
@@ -196,15 +210,15 @@ export async function pushMirror(dir, destUrl, env, timeoutMs, mode = 'refspecs'
           'refs/tags/*:refs/tags/*',
           'refs/notes/*:refs/notes/*',
         ];
-  const { stderr } = await runGit(args, { cwd: dir, env, timeoutMs });
+  const { stderr } = await runGit(args, { cwd: dir, ...git });
   return stderr.trim();
 }
 
-export async function detectLfs(dir, env, timeoutMs, defaultBranch) {
+export async function detectLfs(dir, git, defaultBranch) {
   const refs = [defaultBranch && `refs/heads/${defaultBranch}`, 'HEAD'].filter(Boolean);
   for (const ref of refs) {
     try {
-      const { stdout } = await runGit(['show', `${ref}:.gitattributes`], { cwd: dir, env, timeoutMs: Math.min(timeoutMs, 60_000) });
+      const { stdout } = await runGit(['show', `${ref}:.gitattributes`], { cwd: dir, ...withTimeout(git, 60_000) });
       if (/filter=lfs/.test(stdout)) return true;
     } catch {
     }
@@ -212,9 +226,9 @@ export async function detectLfs(dir, env, timeoutMs, defaultBranch) {
   return false;
 }
 
-export async function transferLfs(dir, sourceUrl, destUrl, sourceEnv, destEnv, timeoutMs) {
-  await runGit(['lfs', 'fetch', '--all', sourceUrl], { cwd: dir, env: sourceEnv, timeoutMs });
-  await runGit(['lfs', 'push', '--all', destUrl], { cwd: dir, env: destEnv, timeoutMs });
+export async function transferLfs(dir, sourceUrl, destUrl, sourceGit, destGit) {
+  await runGit(['lfs', 'fetch', '--all', sourceUrl], { cwd: dir, ...sourceGit });
+  await runGit(['lfs', 'push', '--all', destUrl], { cwd: dir, ...destGit });
 }
 
 export async function hasGitLfs() {
@@ -226,8 +240,8 @@ export async function hasGitLfs() {
   }
 }
 
-export async function remoteRefs(url, env, timeoutMs) {
-  const { stdout } = await runGit(['ls-remote', '--heads', '--tags', url], { cwd: undefined, env, timeoutMs });
+export async function remoteRefs(url, git) {
+  const { stdout } = await runGit(['ls-remote', '--heads', '--tags', url], { cwd: undefined, ...git });
   const refs = new Map();
   for (const line of stdout.split('\n')) {
     const [sha, ref] = line.trim().split(/\s+/);

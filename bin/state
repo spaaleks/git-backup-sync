@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Print the state store as JSON. sqlite3 is not in the image, and this is the
+# thing you want when a run looks wrong.
+#
+#   bin/state                     the whole store
+#   bin/state | jq '.repo[]'      one table
+#
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+  exit 0
+fi
+
+for f in config.yml .env; do
+  [ -f "$f" ] || { echo "missing $root/$f" >&2; exit 1; }
+done
+
+# Set COMPOSE_FILE=docker-compose.local.yml to use a locally built image.
+export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+
+exec docker compose run --rm sync --state

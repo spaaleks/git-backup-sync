@@ -168,10 +168,22 @@ export async function createGroup(connection, { name, path, parentId, visibility
   return { id: data.id, fullPath: data.full_path, name: data.name };
 }
 
-export async function getProject(connection, fullPath) {
+// A project marked for deletion is renamed to <path>-deletion_scheduled-<id> and
+// leaves a redirect route behind, so the API answers for the old path with the
+// doomed project. Pushing into it is refused, so the old path counts as free.
+export async function getProject(connection, fullPath, { followRedirect = false } = {}) {
   const { data, status } = await connection.request(`/projects/${enc(fullPath)}?statistics=true`, { expect404: true });
   if (status === 404) return null;
+  if (!followRedirect && !samePath(data?.path_with_namespace, fullPath)) return null;
   return data;
+}
+
+function samePath(a, b) {
+  return String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+}
+
+export function markedForDeletion(project) {
+  return Boolean(project?.marked_for_deletion_at || project?.marked_for_deletion_on);
 }
 
 export async function createProject(connection, { name, path, namespaceId, visibility, disableCi }) {
@@ -298,8 +310,11 @@ export async function archiveProject(connection, projectId) {
   await connection.request(`/projects/${projectId}/archive`, { method: 'POST' });
 }
 
-export async function deleteProject(connection, projectId) {
-  await connection.request(`/projects/${projectId}`, { method: 'DELETE' });
+export async function deleteProject(connection, projectId, { permanently = false, fullPath } = {}) {
+  // Purging needs the current path as proof, and only works once the project is
+  // already marked for deletion.
+  const query = permanently ? `?permanently_remove=true&full_path=${encodeURIComponent(fullPath)}` : '';
+  await connection.request(`/projects/${projectId}${query}`, { method: 'DELETE' });
 }
 
 export async function canWriteNamespace(connection, namespace) {

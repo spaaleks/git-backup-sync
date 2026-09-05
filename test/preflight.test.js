@@ -6,6 +6,7 @@ import { validate, configSchema } from '../src/config/schema.js';
 import { buildConnections } from '../src/connections.js';
 import { enumerateAll, resolveAll, preflight } from '../src/run.js';
 import { NamespaceResolver } from '../src/namespaces.js';
+import * as gitlab from '../src/providers/gitlab.js';
 
 async function setup(fixture, buildDoc) {
   const api = await startFakeApi(fixture);
@@ -321,4 +322,27 @@ test('a GitLab user scope with include_owned_groups walks the whole tree', async
   const { mappings } = await runPreflight({ config, connections });
   const paths = mappings.map((m) => m.path).sort();
   assert.deepEqual(paths, ['userA-mirror/acme/infra/router', 'userA-mirror/personal-tool']);
+});
+
+test('a path left behind by a scheduled deletion counts as free', async (t) => {
+  const api = await startFakeApi({
+    tokenOwner: 'userA',
+    groups: { mirror: { id: 2, full_path: 'mirror', name: 'mirror' } },
+    projects: {
+      'mirror/router': glProject('mirror/router-deletion_scheduled-9', {
+        id: 9,
+        marked_for_deletion_at: '2026-09-04',
+      }),
+    },
+  });
+  t.after(() => api.close());
+
+  const conn = glConn(api);
+  const connection = buildConnections({ connections: { dst: conn } }).dst;
+
+  assert.equal(await gitlab.getProject(connection, 'mirror/router'), null, 'the old path must not resolve to the doomed project');
+
+  const followed = await gitlab.getProject(connection, 'mirror/router', { followRedirect: true });
+  assert.equal(followed.id, 9);
+  assert.equal(gitlab.markedForDeletion(followed), true);
 });
